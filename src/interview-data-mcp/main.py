@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import time
 from uuid import UUID
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+import fastapi
 from mcp.server.fastmcp import FastMCP
 
 from db import Base, engine
@@ -76,10 +79,44 @@ async def startup():
 async def lifespan(app: FastAPI):
     # here put code to run on startup
     await startup()
-    yield
+    async with contextlib.AsyncExitStack() as stack:
+        await stack.enter_async_context(mcp.session_manager.run())
+        yield
     # here put code to run on shutdown
 
 app = FastAPI(title="interview-data-mcp", lifespan=lifespan)
 
-# Expose MCP on /mcp
+
+@app.middleware("http")
+async def log_http_requests(request: Request, call_next):
+    start = time.perf_counter()
+    logger.info("HTTP start method=%s path=%s", request.method, request.url.path)
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.exception(
+            "HTTP error method=%s path=%s duration_ms=%.2f",
+            request.method,
+            request.url.path,
+            elapsed_ms,
+        )
+        raise
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    logger.info(
+        "HTTP end method=%s path=%s status=%s duration_ms=%.2f",
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed_ms,
+    )
+    return response
+
+
+@app.get("/health", response_class=fastapi.responses.PlainTextResponse)
+async def health_check():
+    """Health check endpoint."""
+    return "Healthy"
+
+
 app.mount("/mcp", mcp.streamable_http_app())

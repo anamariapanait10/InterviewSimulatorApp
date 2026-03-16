@@ -2,7 +2,7 @@ import os
 import uuid
 from typing import Dict, Tuple
 from agents import build_workflow_agent
-
+import logging
 import fastapi
 import fastapi.responses
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from agent_framework.openai import OpenAIChatClient
 from agent_framework.ag_ui import add_agent_framework_fastapi_endpoint
 from contextlib import asynccontextmanager
+import sys
 
 uploaded_files: Dict[str, Tuple[bytes, str, str]] = {}
 allowed_extensions = {".pdf", ".docx", ".doc", ".txt", ".md", ".html"}

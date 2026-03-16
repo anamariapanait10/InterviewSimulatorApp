@@ -30,12 +30,13 @@ var sqlite = builder.AddSqlite(RESOURCE_DB_SQLITE, databaseFileName: RESOURCE_DB
     .WithSqliteWeb();
 
 var mcpInterviewData = builder.AddUvicornApp(
-        name: "mcp-interview-data",
+        name: "interview-data",
         appDirectory: "./src/interview-data-mcp",
         app: "main:app")
     .WithUv()
     .WithExternalHttpEndpoints()
-    .WithHttpEndpoint(port: 8001, env: "PORT", name: "mcp-interview-data")
+    .WithHttpEndpoint(port: 8001, env: "PORT", name: "mcp")
+    .WithHttpHealthCheck("/health")
     .WaitFor(sqlite);
 
 var agent = builder.AddUvicornApp(
@@ -48,19 +49,21 @@ var agent = builder.AddUvicornApp(
     .WithEnvironment("GITHUB_MODELS_TOKEN", builder.Configuration["Github:Token"] ?? "")
     .WithEnvironment("GITHUB_MODELS_MODEL", builder.Configuration["Github:Model"] ?? "openai/gpt-4.1")
     .WithReference(mcpMarkItDown.GetEndpoint("http"))
-    .WithReference(mcpInterviewData)
+    .WithReference(mcpInterviewData.GetEndpoint("mcp"))
+    .WithHttpHealthCheck("/health")
     .WaitFor(mcpMarkItDown)
     .WaitFor(mcpInterviewData);
 
-var app = builder.AddUvicornApp("backend", "./src/backend", "main:app")
+var backend = builder.AddUvicornApp("backend", "./src/backend", "main:app")
     .WithUv()
     .WithExternalHttpEndpoints()
+    .WithReference(agent)
     .WithHttpHealthCheck("/health");
 
 var frontend = builder.AddViteApp("frontend", "./src/frontend")
-    .WithReference(app)
-    .WaitFor(app);
+    .WithReference(backend)
+    .WaitFor(backend);
 
-app.PublishWithContainerFiles(frontend, "./static");
+backend.PublishWithContainerFiles(frontend, "./static");
 
 builder.Build().Run();

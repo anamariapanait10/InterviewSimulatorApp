@@ -1,20 +1,65 @@
 from agent_framework import Agent, MCPStreamableHTTPTool
 from agent_framework.orchestrations import HandoffBuilder
 import os
+import sys
 
-MARKITDOWN_MCP_URL = os.environ.get("MARKITDOWN_MCP_URL", "http://mcp-markitdown:3001/sse")
-INTERVIEWDATA_MCP_URL = os.environ.get("INTERVIEWDATA_MCP_URL", "http://mcp-interview-data/mcp")
+for k, v in sorted(os.environ.items()):
+    if "MARKITDOWN" in k or "INTERVIEW" in k or k.endswith("_HTTP") or k.endswith("_HTTPS"):
+        print(f"[env] {k}={v}", file=sys.stderr, flush=True)
+
+def require_env(name):
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing environment variable: {name}")
+    return value
+
+
+def mcp_url(base_url: str, trailing_slash: bool = False) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/mcp"):
+        return f"{normalized}/" if trailing_slash else normalized
+    return f"{normalized}/mcp/" if trailing_slash else f"{normalized}/mcp"
+
+MARKITDOWN_MCP_URL = mcp_url(require_env("MCP_MARKITDOWN_HTTP"))
+INTERVIEWDATA_MCP_URL = mcp_url(require_env("INTERVIEW_DATA_MCP"), trailing_slash=True)
 
 async def build_workflow_agent(chat_client):
     markitdown = MCPStreamableHTTPTool(
         name="markitdown",
         url=MARKITDOWN_MCP_URL,
     )
-
+    
     interview_data = MCPStreamableHTTPTool(
         name="interview_data",
         url=INTERVIEWDATA_MCP_URL,
     )
+
+    print(f"[startup] Connecting to MCP server 'markitdown' at {MARKITDOWN_MCP_URL}", file=sys.stderr, flush=True)
+    try:
+        await markitdown.connect()
+        print("[startup] Connected to MCP server 'markitdown' successfully", file=sys.stderr, flush=True)
+    except Exception as ex:
+        print(f"[startup] Failed to connect to MCP server 'markitdown': {ex}", file=sys.stderr, flush=True)
+        raise
+
+    print(f"[startup] Connecting to MCP server 'interview_data' at {INTERVIEWDATA_MCP_URL}", file=sys.stderr, flush=True)
+    try:
+        print(f"[startup] interview_data url={INTERVIEWDATA_MCP_URL}", file=sys.stderr, flush=True)
+        await interview_data.connect()
+        print("[startup] Connected to MCP server 'interview_data' successfully", file=sys.stderr, flush=True)
+    except Exception as ex:
+        alt_url = INTERVIEWDATA_MCP_URL.rstrip("/")
+        if alt_url == INTERVIEWDATA_MCP_URL:
+            alt_url = f"{INTERVIEWDATA_MCP_URL}/"
+        print(
+            f"[startup] Failed to connect to MCP server 'interview_data' at {INTERVIEWDATA_MCP_URL}: {ex}",
+            file=sys.stderr,
+            flush=True,
+        )
+        print(f"[startup] Retrying MCP server 'interview_data' at {alt_url}", file=sys.stderr, flush=True)
+        interview_data = MCPStreamableHTTPTool(name="interview_data", url=alt_url)
+        await interview_data.connect()
+        print("[startup] Connected to MCP server 'interview_data' on retry", file=sys.stderr, flush=True)
 
     triage = Agent(
         client=chat_client,
@@ -87,6 +132,7 @@ async def build_workflow_agent(chat_client):
         tools=[interview_data],
     )
 
+    print("[startup] Building interview workflow graph", file=sys.stderr, flush=True)
     workflow = (
         HandoffBuilder(
             name="interview_coach_handoff",
@@ -101,4 +147,6 @@ async def build_workflow_agent(chat_client):
         .build()
     )
 
-    return workflow.as_agent(name="Interview Coach")
+    workflow_agent = workflow.as_agent(name="Interview Coach")
+    print("[startup] Workflow created successfully as agent 'Interview Coach'", file=sys.stderr, flush=True)
+    return workflow_agent

@@ -1,182 +1,292 @@
-import { useState, useEffect } from 'react'
-import aspireLogo from '/Aspire.png'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { FormEvent } from 'react'
 import './App.css'
 
-interface WeatherForecast {
-  date: string
-  temperatureC: number
-  temperatureF: number
-  summary: string
+interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+}
+
+interface StreamEvent {
+  type: 'start' | 'delta' | 'done' | 'error'
+  delta?: string
+  error?: string
+}
+
+const WELCOME_TEXT =
+  "I'm your interview coach. Share your resume and job description, and I'll guide a realistic interview flow."
+
+function createMessage(role: ChatMessage['role'], content: string): ChatMessage {
+  return {
+    id: crypto.randomUUID(),
+    role,
+    content,
+  }
+}
+
+async function readSseStream(
+  response: Response,
+  onEvent: (event: StreamEvent) => void,
+): Promise<void> {
+  if (!response.body) {
+    throw new Error('Missing response stream from server')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) {
+      break
+    }
+
+    buffer += decoder.decode(value, { stream: true })
+    const events = buffer.split('\n\n')
+    buffer = events.pop() ?? ''
+
+    for (const block of events) {
+      const dataLine = block
+        .split('\n')
+        .map((line) => line.trim())
+        .find((line) => line.startsWith('data:'))
+
+      if (!dataLine) {
+        continue
+      }
+
+      const data = dataLine.slice(5).trim()
+      if (!data) {
+        continue
+      }
+
+      try {
+        const parsed = JSON.parse(data) as StreamEvent
+        onEvent(parsed)
+      } catch {
+        onEvent({ type: 'delta', delta: data })
+      }
+    }
+  }
 }
 
 function App() {
-  const [weatherData, setWeatherData] = useState<WeatherForecast[]>([])
-  const [loading, setLoading] = useState(false)
+  const [sessionId, setSessionId] = useState<string>(() => crypto.randomUUID())
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [draft, setDraft] = useState('')
+  const [attachedFile, setAttachedFile] = useState<File | null>(null)
+  const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [useCelsius, setUseCelsius] = useState(false)
+  const endRef = useRef<HTMLDivElement | null>(null)
 
-  const fetchWeatherForecast = async () => {
-    setLoading(true)
+  const messageHistory = useMemo(
+    () => messages.filter((message) => message.role !== 'system'),
+    [messages],
+  )
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messageHistory, isStreaming])
+
+  const resetConversation = async () => {
     setError(null)
-    
+    setIsStreaming(false)
+    setAttachedFile(null)
+    setDraft('')
+
     try {
-      const response = await fetch('/api/weatherforecast')
-      
+      const response = await fetch('/api/session/new', { method: 'POST' })
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
+        throw new Error(`Session reset failed (${response.status})`)
       }
-      
-      const data: WeatherForecast[] = await response.json()
-      setWeatherData(data)
+
+      const data = (await response.json()) as { sessionId: string; systemPrompt: string }
+      setSessionId(data.sessionId)
+      setMessages([
+        createMessage('system', data.systemPrompt),
+        createMessage('system', `Session ID: ${data.sessionId}`),
+        createMessage('assistant', WELCOME_TEXT),
+      ])
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch weather data')
-      console.error('Error fetching weather forecast:', err)
-    } finally {
-      setLoading(false)
+      const message = err instanceof Error ? err.message : 'Unable to start a new session'
+      setError(message)
     }
   }
 
   useEffect(() => {
-    fetchWeatherForecast()
+    void resetConversation()
   }, [])
 
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString(undefined, { 
-      weekday: 'short', 
-      month: 'short', 
-      day: 'numeric' 
+  const uploadAttachment = async (file: File): Promise<string> => {
+    const formData = new FormData()
+    formData.append('file', file)
+
+    const response = await fetch('/api/upload', {
+      method: 'POST',
+      body: formData,
     })
+
+    if (!response.ok) {
+      throw new Error(`Upload failed (${response.status})`)
+    }
+
+    const payload = (await response.json()) as { url?: string }
+    if (!payload.url) {
+      throw new Error('Upload response did not include file URL')
+    }
+
+    return payload.url
+  }
+
+  const submitMessage = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (isStreaming) {
+      return
+    }
+
+    setError(null)
+    const rawText = draft.trim()
+    if (!rawText && !attachedFile) {
+      return
+    }
+
+    try {
+      let composedText = rawText
+      if (attachedFile) {
+        const fileUrl = await uploadAttachment(attachedFile)
+        composedText = [rawText, `Attachment URL: ${fileUrl}`].filter(Boolean).join('\n\n')
+      }
+
+      const userMessage = createMessage('user', composedText)
+      const assistantMessage = createMessage('assistant', '')
+
+      const nextMessages = [...messageHistory, userMessage, assistantMessage]
+      setMessages((previous) => [
+        ...previous.filter((message) => message.role === 'system'),
+        ...nextMessages,
+      ])
+      setDraft('')
+      setAttachedFile(null)
+      setIsStreaming(true)
+
+      const response = await fetch('/api/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId,
+          message: composedText,
+          history: messages
+            .filter((message) => message.content.trim().length > 0)
+            .filter((message) => !(message.role === 'assistant' && message.content === WELCOME_TEXT))
+            .map((message) => ({
+            role: message.role,
+            content: message.content,
+          })),
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`Chat request failed (${response.status})`)
+      }
+
+      await readSseStream(response, (eventPayload) => {
+        if (eventPayload.type === 'delta' && eventPayload.delta) {
+          setMessages((previous) =>
+            previous.map((item) =>
+              item.id === assistantMessage.id
+                ? { ...item, content: `${item.content}${eventPayload.delta}` }
+                : item,
+            ),
+          )
+        }
+
+        if (eventPayload.type === 'error') {
+          setError(eventPayload.error ?? 'Agent stream failed')
+        }
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to send message'
+      setError(message)
+    } finally {
+      setIsStreaming(false)
+    }
   }
 
   return (
-    <div className="app-container">
-      <header className="app-header">
-        <a 
-          href="https://aspire.dev" 
-          target="_blank" 
-          rel="noopener noreferrer"
-          aria-label="Visit Aspire website (opens in new tab)"
-          className="logo-link"
-        >
-          <img src={aspireLogo} className="logo" alt="Aspire logo" />
-        </a>
-        <h1 className="app-title">Aspire Starter</h1>
-        <p className="app-subtitle">Modern distributed application development</p>
+    <div className="coach-shell">
+      <header className="coach-header">
+        <div>
+          <p className="eyebrow">Interview Simulator</p>
+          <h1>Interview Coach</h1>
+          <p className="session-id">Session: {sessionId}</p>
+        </div>
+        <button type="button" onClick={() => void resetConversation()} className="new-chat-button">
+          New Chat
+        </button>
       </header>
 
-      <main className="main-content">
-        <section className="weather-section" aria-labelledby="weather-heading">
-          <div className="card">
-            <div className="section-header">
-              <h2 id="weather-heading" className="section-title">Weather Forecast</h2>
-              <div className="header-actions">
-                <fieldset className="toggle-switch" aria-label="Temperature unit selection">
-                  <legend className="visually-hidden">Temperature unit</legend>
-                  <button 
-                    className={`toggle-option ${!useCelsius ? 'active' : ''}`}
-                    onClick={() => setUseCelsius(false)}
-                    aria-pressed={!useCelsius}
-                    type="button"
-                  >
-                    <span aria-hidden="true">°F</span>
-                    <span className="visually-hidden">Fahrenheit</span>
-                  </button>
-                  <button 
-                    className={`toggle-option ${useCelsius ? 'active' : ''}`}
-                    onClick={() => setUseCelsius(true)}
-                    aria-pressed={useCelsius}
-                    type="button"
-                  >
-                    <span aria-hidden="true">°C</span>
-                    <span className="visually-hidden">Celsius</span>
-                  </button>
-                </fieldset>
-                <button 
-                  className="refresh-button"
-                  onClick={fetchWeatherForecast} 
-                  disabled={loading}
-                  aria-label={loading ? 'Loading weather forecast' : 'Refresh weather forecast'}
-                  type="button"
-                >
-                  <svg 
-                    className={`refresh-icon ${loading ? 'spinning' : ''}`}
-                    width="20" 
-                    height="20" 
-                    viewBox="0 0 24 24" 
-                    fill="none" 
-                    stroke="currentColor" 
-                    strokeWidth="2"
-                    aria-hidden="true"
-                    focusable="false"
-                  >
-                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
-                  </svg>
-                  <span>{loading ? 'Loading...' : 'Refresh'}</span>
-                </button>
-              </div>
-            </div>
-            
-            {error && (
-              <div className="error-message" role="alert" aria-live="polite">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                  <circle cx="12" cy="12" r="10"/>
-                  <line x1="12" y1="8" x2="12" y2="12"/>
-                  <line x1="12" y1="16" x2="12.01" y2="16"/>
-                </svg>
-                <span>{error}</span>
-              </div>
-            )}
-            
-            {loading && weatherData.length === 0 && (
-              <div className="loading-skeleton" role="status" aria-live="polite" aria-label="Loading weather data">
-                {[...Array(5)].map((_, i) => (
-                  <div key={i} className="skeleton-row" aria-hidden="true" />
-                ))}
-                <span className="visually-hidden">Loading weather forecast data...</span>
-              </div>
-            )}
-            
-            {weatherData.length > 0 && (
-              <div className="weather-grid">
-                {weatherData.map((forecast, index) => (
-                  <article key={index} className="weather-card" aria-label={`Weather for ${formatDate(forecast.date)}`}>
-                    <h3 className="weather-date">
-                      <time dateTime={forecast.date}>{formatDate(forecast.date)}</time>
-                    </h3>
-                    <p className="weather-summary">{forecast.summary}</p>
-                    <div className="weather-temps" aria-label={`Temperature: ${useCelsius ? forecast.temperatureC : forecast.temperatureF} degrees ${useCelsius ? 'Celsius' : 'Fahrenheit'}`}>
-                      <div className="temp-group">
-                        <span className="temp-value" aria-hidden="true">
-                          {useCelsius ? forecast.temperatureC : forecast.temperatureF}°
-                        </span>
-                        <span className="temp-unit" aria-hidden="true">{useCelsius ? 'Celsius' : 'Fahrenheit'}</span>
-                      </div>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            )}
-          </div>
+      <main className="chat-panel">
+        <section className="messages" aria-label="Chat messages">
+          {messageHistory.length === 0 ? (
+            <div className="empty-state">{WELCOME_TEXT}</div>
+          ) : (
+            messageHistory.map((message) => (
+              <article key={message.id} className={`bubble bubble-${message.role}`}>
+                <p className="bubble-role">{message.role === 'assistant' ? 'Coach' : 'You'}</p>
+                <p>{message.content || (isStreaming && message.role === 'assistant' ? 'Thinking...' : '')}</p>
+              </article>
+            ))
+          )}
+          <div ref={endRef} />
         </section>
-      </main>
 
-      <footer className="app-footer">
-        <nav aria-label="Footer navigation">
-          <a href="https://aspire.dev" target="_blank" rel="noopener noreferrer">
-            Learn more about Aspire<span className="visually-hidden"> (opens in new tab)</span>
-          </a>
-          <a 
-            href="https://github.com/dotnet/aspire" 
-            target="_blank" 
-            rel="noopener noreferrer"
-            className="github-link"
-            aria-label="View Aspire on GitHub (opens in new tab)"
-          >
-            <img src="/github.svg" alt="" width="24" height="24" aria-hidden="true" />
-            <span className="visually-hidden">GitHub</span>
-          </a>
-        </nav>
-      </footer>
+        {error && (
+          <p className="error-banner" role="alert" aria-live="polite">
+            {error}
+          </p>
+        )}
+
+        <form className="composer" onSubmit={submitMessage}>
+          <label htmlFor="message-input" className="sr-only">
+            Your message
+          </label>
+          <textarea
+            id="message-input"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            placeholder="Answer the latest question or ask for targeted interview practice"
+            rows={3}
+            disabled={isStreaming}
+          />
+
+          <div className="composer-row">
+            <label className="file-picker">
+              <input
+                type="file"
+                accept=".pdf,.docx,.doc,.txt,.md,.html"
+                onChange={(event) => setAttachedFile(event.target.files?.[0] ?? null)}
+                disabled={isStreaming}
+              />
+              Attach File
+            </label>
+
+            <button type="submit" disabled={isStreaming || (!draft.trim() && !attachedFile)}>
+              {isStreaming ? 'Streaming...' : 'Send'}
+            </button>
+          </div>
+
+          {attachedFile && (
+            <p className="file-chip">
+              {attachedFile.name}
+              <button type="button" onClick={() => setAttachedFile(null)} disabled={isStreaming}>
+                Remove
+              </button>
+            </p>
+          )}
+        </form>
+      </main>
     </div>
   )
 }
