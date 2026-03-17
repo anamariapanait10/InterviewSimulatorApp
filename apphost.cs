@@ -49,7 +49,7 @@ var agent = builder.AddUvicornApp(
     .WithEnvironment("GITHUB_MODELS_TOKEN", builder.Configuration["Github:Token"] ?? "")
     .WithEnvironment("GITHUB_MODELS_MODEL", builder.Configuration["Github:Model"] ?? "openai/gpt-4.1")
     .WithReference(mcpMarkItDown.GetEndpoint("http"))
-    .WithReference(mcpInterviewData.GetEndpoint("mcp"))
+    .WithReference(mcpInterviewData.GetEndpoint("http"))
     .WithHttpHealthCheck("/health")
     .WaitFor(mcpMarkItDown)
     .WaitFor(mcpInterviewData);

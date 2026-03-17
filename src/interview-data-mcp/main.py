@@ -9,17 +9,20 @@ from uuid import UUID
 from fastapi import FastAPI, Request
 import fastapi
 from mcp.server.fastmcp import FastMCP
-
+import sys
 from db import Base, engine
 from models import InterviewSessionModel
 from repository import InterviewSessionRepository
 from contextlib import asynccontextmanager
 
+port = int(os.getenv("PORT", "1234"))
+print(f"Starting interview-data MCP server on port {port}...", file=sys.stderr, flush=True)
+
 logger = logging.getLogger("interviewdata")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 repo = InterviewSessionRepository()
-mcp = FastMCP("InterviewData")
+mcp = FastMCP("InterviewData", stateless_http=True, json_response=True)
 
 
 @mcp.tool(name="add_interview_session")
@@ -69,20 +72,17 @@ async def complete_interview_session(id: UUID) -> InterviewSessionModel | None:
         return None
     logger.info("Completed interview session '%s'", id)
     return completed
-
-
-async def startup():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # here put code to run on startup
-    await startup()
-    async with contextlib.AsyncExitStack() as stack:
-        await stack.enter_async_context(mcp.session_manager.run())
+    print("[startup] Starting up database connection", file=sys.stderr, flush=True)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    print("[startup] Initializing MCP tools", file=sys.stderr, flush=True)
+    async with mcp.session_manager.run():
         yield
-    # here put code to run on shutdown
 
 app = FastAPI(title="interview-data-mcp", lifespan=lifespan)
 
@@ -119,4 +119,4 @@ async def health_check():
     return "Healthy"
 
 
-app.mount("/mcp", mcp.streamable_http_app())
+app.mount("/interview-data", mcp.streamable_http_app())

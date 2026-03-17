@@ -24,7 +24,8 @@ if not github_token:
 workflow_agent = None
 client = None
 
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global workflow_agent
     global client
     
@@ -40,13 +41,7 @@ async def startup():
     
     workflow_agent = await build_workflow_agent(client)
     add_agent_framework_fastapi_endpoint(app, workflow_agent, path="/ag-ui")
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # here put code to run on startup
-    await startup()
     yield
-    # here put code to run on shutdown
 
 app = FastAPI(title="Interview Coach Agent", lifespan=lifespan)
 

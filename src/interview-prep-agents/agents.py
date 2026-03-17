@@ -13,15 +13,8 @@ def require_env(name):
         raise RuntimeError(f"Missing environment variable: {name}")
     return value
 
-
-def mcp_url(base_url: str, trailing_slash: bool = False) -> str:
-    normalized = base_url.rstrip("/")
-    if normalized.endswith("/mcp"):
-        return f"{normalized}/" if trailing_slash else normalized
-    return f"{normalized}/mcp/" if trailing_slash else f"{normalized}/mcp"
-
-MARKITDOWN_MCP_URL = mcp_url(require_env("MCP_MARKITDOWN_HTTP"))
-INTERVIEWDATA_MCP_URL = mcp_url(require_env("INTERVIEW_DATA_MCP"), trailing_slash=True)
+MARKITDOWN_MCP_URL = require_env("MCP_MARKITDOWN_HTTP") + "/mcp"
+INTERVIEWDATA_MCP_URL = require_env("INTERVIEW_DATA_HTTP") + "/interview-data/mcp"
 
 async def build_workflow_agent(chat_client):
     markitdown = MCPStreamableHTTPTool(
@@ -44,22 +37,15 @@ async def build_workflow_agent(chat_client):
 
     print(f"[startup] Connecting to MCP server 'interview_data' at {INTERVIEWDATA_MCP_URL}", file=sys.stderr, flush=True)
     try:
-        print(f"[startup] interview_data url={INTERVIEWDATA_MCP_URL}", file=sys.stderr, flush=True)
         await interview_data.connect()
         print("[startup] Connected to MCP server 'interview_data' successfully", file=sys.stderr, flush=True)
     except Exception as ex:
-        alt_url = INTERVIEWDATA_MCP_URL.rstrip("/")
-        if alt_url == INTERVIEWDATA_MCP_URL:
-            alt_url = f"{INTERVIEWDATA_MCP_URL}/"
         print(
             f"[startup] Failed to connect to MCP server 'interview_data' at {INTERVIEWDATA_MCP_URL}: {ex}",
             file=sys.stderr,
             flush=True,
         )
-        print(f"[startup] Retrying MCP server 'interview_data' at {alt_url}", file=sys.stderr, flush=True)
-        interview_data = MCPStreamableHTTPTool(name="interview_data", url=alt_url)
-        await interview_data.connect()
-        print("[startup] Connected to MCP server 'interview_data' on retry", file=sys.stderr, flush=True)
+        raise
 
     triage = Agent(
         client=chat_client,
