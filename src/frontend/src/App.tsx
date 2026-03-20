@@ -37,6 +37,30 @@ async function readSseStream(
   const decoder = new TextDecoder()
   let buffer = ''
 
+  const emitBlock = (block: string) => {
+    const dataLines = block
+      .split('\n')
+      .map((line) => line.trimStart())
+      .filter((line) => line.startsWith('data:'))
+
+    if (dataLines.length === 0) {
+      return
+    }
+
+    const data = dataLines.map((line) => line.slice(5).trimStart()).join('\n').trim()
+    if (!data) {
+      return
+    }
+
+    try {
+      const parsed = JSON.parse(data) as StreamEvent
+      onEvent(parsed)
+    } catch {
+      // Ignore malformed SSE fragments instead of rendering protocol noise.
+      return
+    }
+  }
+
   while (true) {
     const { value, done } = await reader.read()
     if (done) {
@@ -48,27 +72,12 @@ async function readSseStream(
     buffer = events.pop() ?? ''
 
     for (const block of events) {
-      const dataLine = block
-        .split('\n')
-        .map((line) => line.trim())
-        .find((line) => line.startsWith('data:'))
-
-      if (!dataLine) {
-        continue
-      }
-
-      const data = dataLine.slice(5).trim()
-      if (!data) {
-        continue
-      }
-
-      try {
-        const parsed = JSON.parse(data) as StreamEvent
-        onEvent(parsed)
-      } catch {
-        onEvent({ type: 'delta', delta: data })
-      }
+      emitBlock(block)
     }
+  }
+
+  if (buffer.trim().length > 0) {
+    emitBlock(buffer)
   }
 }
 

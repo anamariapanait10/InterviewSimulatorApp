@@ -15,9 +15,6 @@ from models import InterviewSessionModel
 from repository import InterviewSessionRepository
 from contextlib import asynccontextmanager
 
-port = int(os.getenv("PORT", "1234"))
-print(f"Starting interview-data MCP server on port {port}...", file=sys.stderr, flush=True)
-
 logger = logging.getLogger("interviewdata")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
@@ -89,14 +86,16 @@ app = FastAPI(title="interview-data-mcp", lifespan=lifespan)
 
 @app.middleware("http")
 async def log_http_requests(request: Request, call_next):
+    trace_id = request.headers.get("x-trace-id", "-")
     start = time.perf_counter()
-    logger.info("HTTP start method=%s path=%s", request.method, request.url.path)
+    logger.info("[trace=%s] HTTP start method=%s path=%s", trace_id, request.method, request.url.path)
     try:
         response = await call_next(request)
     except Exception:
         elapsed_ms = (time.perf_counter() - start) * 1000
         logger.exception(
-            "HTTP error method=%s path=%s duration_ms=%.2f",
+            "[trace=%s] HTTP error method=%s path=%s duration_ms=%.2f",
+            trace_id,
             request.method,
             request.url.path,
             elapsed_ms,
@@ -104,12 +103,14 @@ async def log_http_requests(request: Request, call_next):
         raise
     elapsed_ms = (time.perf_counter() - start) * 1000
     logger.info(
-        "HTTP end method=%s path=%s status=%s duration_ms=%.2f",
+        "[trace=%s] HTTP end method=%s path=%s status=%s duration_ms=%.2f",
+        trace_id,
         request.method,
         request.url.path,
         response.status_code,
         elapsed_ms,
     )
+    response.headers["x-trace-id"] = trace_id
     return response
 
 
