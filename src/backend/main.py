@@ -107,12 +107,11 @@ async def _read_agent_stream(
     trace_id: str,
 ) -> AsyncIterator[dict[str, Any]]:
     is_sse = "text/event-stream" in response.headers.get("content-type", "")
-    logger.info("[trace=%s] agent stream opened content_type=%s is_sse=%s", trace_id, response.headers.get("content-type"), is_sse)
+    logger.debug("[trace=%s] agent stream opened is_sse=%s", trace_id, is_sse)
 
     if not is_sse:
         async for chunk in response.aiter_text():
             if chunk:
-                logger.info("[trace=%s] agent non-sse chunk len=%s", trace_id, len(chunk))
                 yield {"type": "delta", "delta": chunk}
         return
 
@@ -137,13 +136,11 @@ async def _read_agent_stream(
             try:
                 parsed = json.loads(data)
             except json.JSONDecodeError:
-                logger.warning("[trace=%s] agent sse non-json event dropped=%s", trace_id, _truncate(data))
+                logger.debug("[trace=%s] dropped malformed sse chunk", trace_id)
                 continue
 
             event_type = parsed.get("type") if isinstance(parsed, dict) else None
             normalized_event_type = str(event_type or "").upper()
-            if normalized_event_type:
-                logger.info("[trace=%s] agent event type=%s", trace_id, normalized_event_type)
 
             if normalized_event_type == "RUN_ERROR":
                 yield {"type": "error", "error": parsed.get("message") or parsed.get("error")}
@@ -158,7 +155,6 @@ async def _read_agent_stream(
             if normalized_event_type == "TEXT_MESSAGE_CONTENT":
                 delta_text = parsed.get("delta")
                 if isinstance(delta_text, str) and delta_text:
-                    logger.info("[trace=%s] agent assistant delta len=%s preview=%s", trace_id, len(delta_text), _truncate(delta_text, 120))
                     yield {"type": "delta", "delta": delta_text}
                 continue
 
@@ -184,7 +180,7 @@ async def _read_agent_stream(
         try:
             parsed = json.loads(trailing)
         except json.JSONDecodeError:
-            logger.warning("[trace=%s] agent sse trailing non-json dropped=%s", trace_id, _truncate(trailing))
+            logger.debug("[trace=%s] dropped malformed trailing sse chunk", trace_id)
             return
 
         event_type = parsed.get("type") if isinstance(parsed, dict) else None
@@ -197,7 +193,6 @@ async def _read_agent_stream(
             yield {"type": "error", "error": parsed.get("message") or parsed.get("error")}
         elif normalized_event_type in {"RUN_FINISHED", "RUN_COMPLETED", "DONE", "COMPLETE", "END"}:
             yield {"type": "done"}
-            yield {"type": "delta", "delta": delta_text}
 
 
 @app.post("/api/session/new", response_model=StartSessionResponse)
@@ -213,7 +208,6 @@ async def upload_file(file: fastapi.UploadFile = fastapi.File(...)):
     trace_id = uuid.uuid4().hex[:12]
     agent_url = f"{get_agent_base_url()}/upload"
     content = await file.read()
-    logger.info("[trace=%s] upload start filename=%s size=%s target=%s", trace_id, file.filename, len(content), agent_url)
 
     files = {
         "file": (file.filename, content, file.content_type or "application/octet-stream"),
@@ -223,7 +217,6 @@ async def upload_file(file: fastapi.UploadFile = fastapi.File(...)):
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(agent_url, files=files, headers={"x-trace-id": trace_id})
             response.raise_for_status()
-            logger.info("[trace=%s] upload complete status=%s", trace_id, response.status_code)
     except httpx.HTTPStatusError as exc:
         detail = exc.response.text or "Upload failed"
         raise fastapi.HTTPException(status_code=exc.response.status_code, detail=detail) from exc
@@ -237,13 +230,11 @@ async def upload_file(file: fastapi.UploadFile = fastapi.File(...)):
 async def get_uploaded_file(file_id: str, file_name: str):
     trace_id = uuid.uuid4().hex[:12]
     agent_url = f"{get_agent_base_url()}/uploads/{file_id}/{file_name}"
-    logger.info("[trace=%s] upload fetch start file_id=%s name=%s target=%s", trace_id, file_id, file_name, agent_url)
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(agent_url, headers={"x-trace-id": trace_id})
             response.raise_for_status()
-            logger.info("[trace=%s] upload fetch complete status=%s size=%s", trace_id, response.status_code, len(response.content))
     except httpx.HTTPStatusError as exc:
         detail = exc.response.text or "File not found"
         raise fastapi.HTTPException(status_code=exc.response.status_code, detail=detail) from exc
@@ -263,14 +254,6 @@ async def get_uploaded_file(file_id: str, file_name: str):
 @app.post("/api/chat/stream")
 async def stream_chat(payload: ChatStreamRequest):
     trace_id = uuid.uuid4().hex[:12]
-    logger.info(
-        "[trace=%s] chat stream start session_id=%s history_count=%s message_chars=%s agent_base=%s",
-        trace_id,
-        payload.sessionId,
-        len(payload.history),
-        len(payload.message),
-        get_agent_base_url(),
-    )
     replay_history = [
         message.model_dump()
         for message in payload.history
@@ -284,7 +267,6 @@ async def stream_chat(payload: ChatStreamRequest):
     }
 
     async def event_generator() -> AsyncIterator[str]:
-        logger.info("[trace=%s] backend stream event=start", trace_id)
         yield _to_sse({"type": "start", "traceId": trace_id})
         done_emitted = False
 
@@ -300,28 +282,26 @@ async def stream_chat(payload: ChatStreamRequest):
                     async for event in _read_agent_stream(response, trace_id=trace_id):
                         if event.get("type") == "error":
                             err = event.get("error") or "Agent stream failed"
-                            logger.error("[trace=%s] backend stream event=error error=%s", trace_id, _truncate(err))
+                            logger.warning("[trace=%s] agent stream error=%s", trace_id, _truncate(err))
                             yield _to_sse({"type": "error", "error": err, "traceId": trace_id})
                             return
                         if event.get("type") == "done":
                             if not done_emitted:
-                                logger.info("[trace=%s] backend stream event=done", trace_id)
                                 yield _to_sse({"type": "done"})
                                 done_emitted = True
                             continue
                         yield _to_sse(event)
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text or "Agent stream request failed"
-            logger.exception("[trace=%s] backend stream http status error=%s", trace_id, _truncate(detail))
+            logger.warning("[trace=%s] agent stream status error=%s", trace_id, _truncate(detail))
             yield _to_sse({"type": "error", "error": detail, "traceId": trace_id})
             return
         except httpx.HTTPError:
-            logger.exception("[trace=%s] backend stream transport error", trace_id)
+            logger.warning("[trace=%s] agent service unavailable", trace_id)
             yield _to_sse({"type": "error", "error": "Agent service unavailable", "traceId": trace_id})
             return
 
         if not done_emitted:
-            logger.info("[trace=%s] backend stream event=done-fallback", trace_id)
             yield _to_sse({"type": "done"})
 
     return fastapi.responses.StreamingResponse(event_generator(), media_type="text/event-stream")

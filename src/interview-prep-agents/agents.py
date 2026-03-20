@@ -1,11 +1,6 @@
 from agent_framework import Agent, MCPStreamableHTTPTool
 from agent_framework.orchestrations import HandoffBuilder
 import os
-import sys
-
-for k, v in sorted(os.environ.items()):
-    if "MARKITDOWN" in k or "INTERVIEW" in k or k.endswith("_HTTP") or k.endswith("_HTTPS"):
-        print(f"[env] {k}={v}", file=sys.stderr, flush=True)
 
 def require_env(name):
     value = os.getenv(name)
@@ -27,25 +22,8 @@ async def build_workflow_agent(chat_client):
         url=INTERVIEWDATA_MCP_URL,
     )
 
-    print(f"[startup] Connecting to MCP server 'markitdown' at {MARKITDOWN_MCP_URL}", file=sys.stderr, flush=True)
-    try:
-        await markitdown.connect()
-        print("[startup] Connected to MCP server 'markitdown' successfully", file=sys.stderr, flush=True)
-    except Exception as ex:
-        print(f"[startup] Failed to connect to MCP server 'markitdown': {ex}", file=sys.stderr, flush=True)
-        raise
-
-    print(f"[startup] Connecting to MCP server 'interview_data' at {INTERVIEWDATA_MCP_URL}", file=sys.stderr, flush=True)
-    try:
-        await interview_data.connect()
-        print("[startup] Connected to MCP server 'interview_data' successfully", file=sys.stderr, flush=True)
-    except Exception as ex:
-        print(
-            f"[startup] Failed to connect to MCP server 'interview_data' at {INTERVIEWDATA_MCP_URL}: {ex}",
-            file=sys.stderr,
-            flush=True,
-        )
-        raise
+    await markitdown.connect()
+    await interview_data.connect()
 
     triage = Agent(
         client=chat_client,
@@ -118,7 +96,6 @@ async def build_workflow_agent(chat_client):
         tools=[interview_data],
     )
 
-    print("[startup] Building interview workflow graph", file=sys.stderr, flush=True)
     workflow = (
         HandoffBuilder(
             name="interview_coach_handoff",
@@ -134,5 +111,4 @@ async def build_workflow_agent(chat_client):
     )
 
     workflow_agent = workflow.as_agent(name="Interview Coach")
-    print("[startup] Workflow created successfully as agent 'Interview Coach'", file=sys.stderr, flush=True)
     return workflow_agent
