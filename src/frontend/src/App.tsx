@@ -14,6 +14,19 @@ interface StreamEvent {
   error?: string
 }
 
+interface RealtimeEvent {
+  type?: string
+  transcript?: string
+  text?: string
+  delta?: string
+  item?: {
+    role?: 'user' | 'assistant'
+  }
+  response?: {
+    output_text?: string
+  }
+}
+
 const WELCOME_TEXT =
   "I'm your interview coach. Share your resume and job description, and I'll guide a realistic interview flow."
 
@@ -87,8 +100,14 @@ function App() {
   const [draft, setDraft] = useState('')
   const [attachedFile, setAttachedFile] = useState<File | null>(null)
   const [isStreaming, setIsStreaming] = useState(false)
+  const [isStartingVoice, setIsStartingVoice] = useState(false)
+  const [isVoiceActive, setIsVoiceActive] = useState(false)
+  const [voiceStatus, setVoiceStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const endRef = useRef<HTMLDivElement | null>(null)
+  const voicePeerRef = useRef<RTCPeerConnection | null>(null)
+  const voiceAudioRef = useRef<HTMLAudioElement | null>(null)
+  const voiceChannelRef = useRef<RTCDataChannel | null>(null)
 
   const messageHistory = useMemo(
     () => messages.filter((message) => message.role !== 'system'),
@@ -127,6 +146,184 @@ function App() {
   useEffect(() => {
     void resetConversation()
   }, [])
+
+  const stopVoiceMode = () => {
+    const dataChannel = voiceChannelRef.current
+    if (dataChannel) {
+      dataChannel.close()
+      voiceChannelRef.current = null
+    }
+
+    const peer = voicePeerRef.current
+    if (peer) {
+      peer.getSenders().forEach((sender) => sender.track?.stop())
+      peer.close()
+      voicePeerRef.current = null
+    }
+
+    const remoteAudio = voiceAudioRef.current
+    if (remoteAudio) {
+      remoteAudio.pause()
+      remoteAudio.srcObject = null
+      voiceAudioRef.current = null
+    }
+
+    setIsVoiceActive(false)
+    setVoiceStatus('Voice mode stopped')
+  }
+
+  const appendRealtimeMessage = (role: 'user' | 'assistant', content: string) => {
+    const clean = content.trim()
+    if (!clean) {
+      return
+    }
+
+    setMessages((previous) => {
+      const last = previous[previous.length - 1]
+      if (last && last.role === role && last.content.trim() === clean) {
+        return previous
+      }
+      return [...previous, createMessage(role, clean)]
+    })
+  }
+
+  const handleRealtimeEvent = (eventPayload: RealtimeEvent) => {
+    const eventType = eventPayload.type ?? ''
+
+    if (eventType === 'conversation.item.input_audio_transcription.completed') {
+      const text = eventPayload.transcript ?? eventPayload.text ?? ''
+      appendRealtimeMessage('user', text)
+      return
+    }
+
+    if (eventType === 'response.audio_transcript.done') {
+      appendRealtimeMessage('assistant', eventPayload.transcript ?? '')
+      return
+    }
+
+    if (eventType === 'response.output_text.done') {
+      appendRealtimeMessage('assistant', eventPayload.text ?? eventPayload.response?.output_text ?? '')
+      return
+    }
+
+    if (eventType === 'error') {
+      setError('Voice stream error from realtime session')
+      return
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      stopVoiceMode()
+    }
+  }, [])
+
+  const startVoiceMode = async () => {
+    if (isVoiceActive) {
+      return
+    }
+
+    setError(null)
+    setVoiceStatus(null)
+    setIsStartingVoice(true)
+
+    try {
+      const response = await fetch('/api/voice/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          voice: 'alloy',
+          model: 'gpt-4o-realtime-preview',
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`Voice session failed (${response.status})`)
+      }
+
+      const payload = (await response.json()) as {
+        id?: string
+        model?: string
+        client_secret?: { value?: string } | string
+      }
+
+      const ephemeralKey =
+        typeof payload.client_secret === 'string'
+          ? payload.client_secret
+          : payload.client_secret?.value
+
+      if (!ephemeralKey) {
+        throw new Error('Voice session did not include an ephemeral key')
+      }
+
+      const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const peerConnection = new RTCPeerConnection()
+
+      audioStream.getTracks().forEach((track) => {
+        peerConnection.addTrack(track, audioStream)
+      })
+
+      const remoteAudio = new Audio()
+      remoteAudio.autoplay = true
+      peerConnection.ontrack = (event) => {
+        remoteAudio.srcObject = event.streams[0]
+      }
+
+      const dataChannel = peerConnection.createDataChannel('oai-events')
+      dataChannel.onopen = () => {
+        setVoiceStatus('Voice session live')
+      }
+      dataChannel.onerror = () => {
+        setError('Voice data channel error')
+      }
+      dataChannel.onclose = () => {
+        setVoiceStatus('Voice channel closed')
+      }
+      dataChannel.onmessage = (event) => {
+        try {
+          const parsed = JSON.parse(String(event.data)) as RealtimeEvent
+          handleRealtimeEvent(parsed)
+        } catch {
+          return
+        }
+      }
+
+      const offer = await peerConnection.createOffer()
+      await peerConnection.setLocalDescription(offer)
+
+      const realtimeResponse = await fetch(
+        `https://api.openai.com/v1/realtime?model=${encodeURIComponent(payload.model ?? 'gpt-4o-realtime-preview')}`,
+        {
+          method: 'POST',
+          body: offer.sdp,
+          headers: {
+            Authorization: `Bearer ${ephemeralKey}`,
+            'Content-Type': 'application/sdp',
+            'OpenAI-Beta': 'realtime=v1',
+          },
+        },
+      )
+
+      if (!realtimeResponse.ok) {
+        throw new Error(`Realtime negotiation failed (${realtimeResponse.status})`)
+      }
+
+      const answerSdp = await realtimeResponse.text()
+      await peerConnection.setRemoteDescription({ type: 'answer', sdp: answerSdp })
+
+      voicePeerRef.current = peerConnection
+      voiceAudioRef.current = remoteAudio
+      voiceChannelRef.current = dataChannel
+      setIsVoiceActive(true)
+      setVoiceStatus(payload.id ? `Voice session connected (${payload.id})` : 'Voice session connected')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to start voice mode'
+      setError(message)
+      stopVoiceMode()
+    } finally {
+      setIsStartingVoice(false)
+    }
+  }
 
   const uploadAttachment = async (file: File): Promise<string> => {
     const formData = new FormData()
@@ -234,6 +431,15 @@ function App() {
         <button type="button" onClick={() => void resetConversation()} className="new-chat-button">
           New Chat
         </button>
+        {isVoiceActive ? (
+          <button type="button" onClick={stopVoiceMode} className="new-chat-button">
+            Stop Voice
+          </button>
+        ) : (
+          <button type="button" onClick={() => void startVoiceMode()} className="new-chat-button" disabled={isStartingVoice}>
+            {isStartingVoice ? 'Starting Voice...' : 'Start Voice'}
+          </button>
+        )}
       </header>
 
       <main className="chat-panel">
@@ -254,6 +460,12 @@ function App() {
         {error && (
           <p className="error-banner" role="alert" aria-live="polite">
             {error}
+          </p>
+        )}
+
+        {voiceStatus && (
+          <p className="error-banner" role="status" aria-live="polite">
+            {voiceStatus}
           </p>
         )}
 
