@@ -1,7 +1,7 @@
-#:sdk Aspire.AppHost.Sdk@13.2.0
-#:package Aspire.Hosting.JavaScript@13.2.0
-#:package Aspire.Hosting.Python@13.2.0
-#:package Aspire.Hosting.GitHub.Models@13.2.0
+#:sdk Aspire.AppHost.Sdk@13.2.1
+#:package Aspire.Hosting.JavaScript@13.2.1
+#:package Aspire.Hosting.Python@13.2.1
+#:package Aspire.Hosting.GitHub.Models@13.2.1
 #:package CommunityToolkit.Aspire.Hosting.SQLite@13.*
 #:package Microsoft.Extensions.Configuration.Json@10.*
 
@@ -30,7 +30,6 @@ var mcpInterviewData = builder.AddUvicornApp(
         app: "main:app")
     .WithUv()
     .WithExternalHttpEndpoints()
-    .WithHttpEndpoint(port: 8001, env: "PORT", name: "mcp")
     .WithEnvironment("BACKEND_URL", "http://127.0.0.1:8002")
     .WithHttpHealthCheck("/health");
 
@@ -45,11 +44,15 @@ var agent = builder.AddUvicornApp(
     .WithEnvironment("OPENAI_MODEL", builder.Configuration["OpenAI:Model"] ?? "gpt-4.1-mini")
     .WithEnvironment("OPENAI_BASE_URL", builder.Configuration["OpenAI:BaseUrl"] ?? "https://api.openai.com/v1")
     .WithReference(mcpMarkItDown.GetEndpoint("http"))
+    .WithReference(mcpInterviewData.GetEndpoint("http"))
     .WithHttpHealthCheck("/health")
     .WaitFor(mcpMarkItDown);
 
 var backend = builder.AddUvicornApp("backend", "./src/backend", "main:app")
     .WithUv()
+        .WithEnvironment("OPENAI_API_KEY", builder.Configuration["OpenAI:ApiKey"] ?? "")
+    .WithEnvironment("OPENAI_MODEL", builder.Configuration["OpenAI:Model"] ?? "gpt-4.1-mini")
+    .WithEnvironment("OPENAI_BASE_URL", builder.Configuration["OpenAI:BaseUrl"] ?? "https://api.openai.com/v1")
     .WithExternalHttpEndpoints()
     .WithReference(agent)
     .WithHttpHealthCheck("/health");

@@ -38,21 +38,18 @@ async def _post_json(path: str, payload: dict | None = None):
 
 @mcp.tool(name="add_interview_session")
 async def add_interview_session(record: InterviewSessionModel) -> InterviewSessionModel:
-    """Adds an interview session through backend API."""
     data = await _post_json("/api/interview-data/add_interview_session", {"record": record.model_dump(mode="json")})
     return InterviewSessionModel.model_validate(data)
 
 
 @mcp.tool(name="get_interview_sessions")
 async def get_interview_sessions() -> list[InterviewSessionModel]:
-    """Gets interview sessions through backend API."""
     data = await _get_json("/api/interview-data/get_interview_sessions")
     return [InterviewSessionModel.model_validate(item) for item in data]
 
 
 @mcp.tool(name="get_interview_session")
 async def get_interview_session(id: UUID) -> InterviewSessionModel | None:
-    """Gets an interview session through backend API."""
     data = await _get_json(f"/api/interview-data/get_interview_session/{id}")
     if data is None:
         return None
@@ -61,7 +58,6 @@ async def get_interview_session(id: UUID) -> InterviewSessionModel | None:
 
 @mcp.tool(name="update_interview_session")
 async def update_interview_session(record: InterviewSessionModel) -> InterviewSessionModel | None:
-    """Updates an interview session through backend API."""
     data = await _post_json("/api/interview-data/update_interview_session", {"record": record.model_dump(mode="json")})
     if data is None:
         return None
@@ -70,7 +66,6 @@ async def update_interview_session(record: InterviewSessionModel) -> InterviewSe
 
 @mcp.tool(name="complete_interview_session")
 async def complete_interview_session(id: UUID) -> InterviewSessionModel | None:
-    """Completes an interview session through backend API."""
     data = await _post_json(f"/api/interview-data/complete_interview_session/{id}")
     if data is None:
         return None

@@ -74,7 +74,7 @@ class InterviewSessionRecordRequest(BaseModel):
 
 class VoiceSessionRequest(BaseModel):
     voice: str = "alloy"
-    model: str = "gpt-4o-realtime-preview"
+    model: str = os.getenv("OPENAI_MODEL", "gpt-4o-realtime-preview")
     instructions: str | None = None
 
 
@@ -442,6 +442,9 @@ async def create_voice_session(payload: VoiceSessionRequest):
     except httpx.HTTPError as exc:
         logger.warning("[trace=%s] voice session unavailable", trace_id)
         raise fastapi.HTTPException(status_code=502, detail="OpenAI Realtime unavailable") from exc
+    except Exception as exc:
+        logger.exception("[trace=%s] unexpected error creating voice session", trace_id)
+        raise fastapi.HTTPException(status_code=500, detail="Unexpected error creating voice session") from exc
 
     return response.json()
 

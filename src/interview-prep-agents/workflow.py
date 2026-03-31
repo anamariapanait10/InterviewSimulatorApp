@@ -4,38 +4,38 @@ import uuid
 import asyncio
 import logging
 import time
-from typing import Any
+import sys
+from typing import Any, cast
 
 import httpx
-
+from agents.mcp import MCPServerStreamableHttp
+from agents import Runner, Agent
 logger = logging.getLogger("interview-prep-agents.workflow")
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 BACKEND_BASE_URL = (
-    os.getenv("BACKEND_HTTP")
-    or "http://127.0.0.1:8002"
+    os.getenv("BACKEND_URL")
+    or os.getenv("BACKEND_HTTP")
+    or ""
 ).rstrip("/")
-INTERVIEW_DATA_API_PREFIX = "/api/interview-data"
+BACKEND_INTERVIEW_DATA_API_PREFIX = "/api/interview-data"
 
+INTERVIEW_DATA_MCP_URL = os.getenv("INTERVIEW_DATA_HTTP") or "http://127.0.0.1:8002"
+INTERVIEW_DATA_MCP_URL = INTERVIEW_DATA_MCP_URL + "/interview-data"
+print(f"Interview Data MCP URL: {INTERVIEW_DATA_MCP_URL}", file=sys.stderr)
 
-INTAKE_INSTRUCTIONS = (
-    "You are an interview coach intake assistant. "
-    "Collect the candidate's target role, experience level, and interview goals. "
-    "If the user shared resume/job-description links, acknowledge them and use their context."
-)
+MARKITDOWN_BASE_URL = (
+    os.getenv("MCP_MARKITDOWN_HTTP")
+    or os.getenv("MARKITDOWN_MCP_URL")
+    or "http://127.0.0.1:3001"
+).rstrip("/")
 
-
-INTERVIEWER_INSTRUCTIONS = (
-    "You are an interview coach. "
-    "Run a realistic interview with one question at a time. "
-    "Mix behavioral and technical prompts based on the user's role. "
-    "After each user response, give concise coaching feedback and the next question."
-)
-
-
-_router_agent: Any | None = None
+_orchestrator_agent: Any | None = None
 _session_locks: dict[str, asyncio.Lock] = {}
 _session_locks_guard = asyncio.Lock()
+_mcp_servers: list[Any] = []
+_mcp_lock = asyncio.Lock()
+_mcp_initialized = False
 
 
 async def _post_json_with_diagnostics(
@@ -107,42 +107,117 @@ async def _post_json_with_diagnostics(
         ) from exc
 
 
-def _build_router_agent() -> Any:
-    global _router_agent
-    if _router_agent is not None:
-        return _router_agent
+def _build_orchestrator_agent() -> Any:
+    global _orchestrator_agent
+    if _orchestrator_agent is not None:
+        return _orchestrator_agent
 
-    try:
-        agents_sdk = importlib.import_module("agents")
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "OpenAI Agents SDK is not installed. Install dependency 'openai-agents'."
-        ) from exc
-
-    Agent = agents_sdk.Agent
-
-    intake_agent = Agent(
-        name="intake",
-        instructions=INTAKE_INSTRUCTIONS,
-        model=OPENAI_MODEL,
-    )
-
-    interviewer_agent = Agent(
-        name="interviewer",
-        instructions=INTERVIEWER_INSTRUCTIONS,
-        model=OPENAI_MODEL,
-    )
-
-    _router_agent = Agent(
-        name="interview_router",
-        model=OPENAI_MODEL,
+    behavioral_agent = Agent(
+        name="behavioral",
         instructions=(
-            "You route interview-coach turns. "
-            "Use intake for onboarding/setup and interviewer for active interview practice."
+            "You are a behavioral interviewer. "
+            "Ask STAR-method questions tailored to the candidate's background. "
+            "Use InterviewData tools to read session context and store answers. "
+            "Ask one question at a time. "
+            "When the behavioral portion is done, hand off to the technical interviewer. "
+            "If the user asks for setup help or changes topic unexpectedly, hand back to the orchestrator."
         ),
-        handoffs=[intake_agent, interviewer_agent],
+        model=OPENAI_MODEL,
+        mcp_servers=_mcp_servers,
     )
-    return _router_agent
+
+    technical_agent = Agent(
+        name="technical",
+        instructions=(
+            """
+            "You are a technical interviewer. "
+            "Ask role-specific technical questions based on the stored resume and job description. "
+            "Use InterviewData tools to read session state and save the candidate's answers. "
+            "Ask one question at a time. "
+            "When the technical round is complete, hand off to the summarizer. "
+            "If the conversation goes off-path, hand back to the orchestrator."
+            """
+        ),
+        model=OPENAI_MODEL,
+        mcp_servers=_mcp_servers,
+    )
+    
+    summarizer = Agent(
+        name="summarizer",
+        instructions=(
+            "You are the interview summarizer. "
+            "Use InterviewData tools to review the full session and generate a final assessment. "
+            "Summarize strengths, weaknesses, behavioral performance, technical performance, "
+            "and 3-5 concrete improvement suggestions. "
+            "After delivering the summary, explain that the interview is complete and greet the user."
+        ),
+        mcp_servers=_mcp_servers,
+    )
+
+    _orchestrator_agent = Agent(
+        name="orchestrator",
+        instructions=(
+            """
+            You are the Interview Orchestrator for an AI Interview Coach system.
+
+            Your job is to:
+            1. Review the FULL conversation history
+            2. Determine which interview phases are already complete
+            3. Fetch the interview session from the interview data MCP server
+            4. Collect and store the user's resume and job description. If the user hasn't provided them, ask the user for their resume and job description (link or text).
+            5. The user may proceed without a resume or without a job description if they choose.
+            6. Use MarkItDown to parse document links into markdown.
+            7. Store the resume and job description in the session record using the interview data MCP server.
+            8. Hand off to the correct specialist agent at the right time
+
+            You do NOT conduct behavioural or technical interviews yourself.
+            You do NOT generate the final summary yourself.
+            Your role is orchestration, intake, and routing.
+
+            Interview phase sequence:
+            1. Reception / session setup / document intake
+            2. Behavioural Interviewer
+            3. Technical Interviewer
+            4. Summariser
+
+            IMPORTANT:
+            - Always review the FULL conversation history before deciding what to do.
+            - Do NOT route to an agent whose phase has already been completed.
+            - When a specialist hands back, treat that phase as COMPLETE and advance to the next one.
+            - If the user explicitly requests a specific phase, honour that request.
+            - If the user wants to end, hand off to "summariser".
+            - If the user's request is unexpected or unclear, briefly ask what they'd like to do.
+
+            Routing rules (apply in order, skipping completed phases):
+            - If session setup or document intake has NOT been completed
+                → handle it yourself first
+            - If intake is complete and behavioural interview has NOT started
+                → hand off to "behavioural_interviewer"
+            - If behavioural interview is complete and technical interview has NOT started
+                → hand off to "technical_interviewer"
+            - If technical interview is complete
+                → hand off to "summariser"
+            - If the user wants to end early
+                → hand off to "summariser"
+            - If the user explicitly requests a specific phase
+                → honour that request
+
+            Tone:
+            - Be brief
+            - Be supportive
+            - Be encouraging
+            - Let specialist agents do the detailed interview work
+
+            Only perform detailed intake/session setup yourself.
+            All interview questioning and summarisation should be handled by the specialist agents.
+        """
+        ),
+        model=OPENAI_MODEL,
+        mcp_servers=_mcp_servers,
+        handoffs=[behavioral_agent, technical_agent, summarizer],
+    )
+
+    return _orchestrator_agent
 
 
 def _normalize_history(history: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -183,9 +258,61 @@ def _extract_attachment_links(message: str) -> tuple[str | None, str | None]:
     return resume_link, job_description_link
 
 
+def _to_mcp_endpoint(base_url: str) -> str:
+    return base_url if base_url.endswith("/mcp") else f"{base_url}/mcp"
+
+
+async def initialize_mcp_servers() -> None:
+    global _mcp_initialized
+    if _mcp_initialized:
+        return
+
+    async with _mcp_lock:
+        if _mcp_initialized:
+            return
+
+        servers: list[Any] = [
+            MCPServerStreamableHttp(
+                params={"url": _to_mcp_endpoint(MARKITDOWN_BASE_URL)},
+                cache_tools_list=True,
+                name="markitdown",
+                client_session_timeout_seconds=30,
+            ),
+            MCPServerStreamableHttp(
+                params={"url": _to_mcp_endpoint(INTERVIEW_DATA_MCP_URL)},
+                cache_tools_list=True,
+                name="interview_data",
+                client_session_timeout_seconds=30,
+            ),
+        ]
+
+        for server in servers:
+            await server.connect()
+
+        _mcp_servers.clear()
+        _mcp_servers.extend(servers)
+        _mcp_initialized = True
+        logger.info(
+            "MCP servers initialized markitdown=%s",
+            _to_mcp_endpoint(MARKITDOWN_BASE_URL),
+        )
+
+
+async def cleanup_mcp_servers() -> None:
+    global _mcp_initialized
+    async with _mcp_lock:
+        for server in _mcp_servers:
+            try:
+                await server.cleanup()
+            except Exception:
+                logger.exception("MCP cleanup failed")
+        _mcp_servers.clear()
+        _mcp_initialized = False
+
+
 async def _ensure_and_load_session(session_id: str) -> dict[str, Any]:
     session_uuid = str(uuid.UUID(session_id))
-    url = f"{BACKEND_BASE_URL}{INTERVIEW_DATA_API_PREFIX}/sessions/{session_uuid}"
+    url = f"{BACKEND_BASE_URL}{BACKEND_INTERVIEW_DATA_API_PREFIX}/sessions/{session_uuid}"
     return await _post_json_with_diagnostics(
         operation="ensure_and_load_session",
         url=url,
@@ -216,6 +343,8 @@ async def _append_turn(
     assistant_message: str,
     resume_link: str | None,
     job_description_link: str | None,
+    resume_text: str | None = None,
+    job_description_text: str | None = None,
 ) -> None:
     session_uuid = str(uuid.UUID(session_id))
     payload = {
@@ -223,8 +352,10 @@ async def _append_turn(
         "assistant_message": assistant_message,
         "resume_link": resume_link,
         "job_description_link": job_description_link,
+        "resume_text": resume_text,
+        "job_description_text": job_description_text,
     }
-    url = f"{BACKEND_BASE_URL}{INTERVIEW_DATA_API_PREFIX}/sessions/{session_uuid}/turn"
+    url = f"{BACKEND_BASE_URL}{BACKEND_INTERVIEW_DATA_API_PREFIX}/sessions/{session_uuid}/turn"
     await _post_json_with_diagnostics(
         operation="append_turn",
         url=url,
@@ -248,6 +379,8 @@ async def _get_session_lock(session_id: str) -> asyncio.Lock:
 
 
 async def run_text_turn(*, message: str, history: list[dict[str, Any]], session_id: str) -> str:
+    await initialize_mcp_servers()
+
     try:
         agents_sdk = importlib.import_module("agents")
     except ModuleNotFoundError as exc:
@@ -255,8 +388,7 @@ async def run_text_turn(*, message: str, history: list[dict[str, Any]], session_
             "OpenAI Agents SDK is not installed. Install dependency 'openai-agents'."
         ) from exc
 
-    Runner = agents_sdk.Runner
-    router_agent = _build_router_agent()
+    router_agent = _build_orchestrator_agent()
 
     lock = await _get_session_lock(session_id)
     async with lock:
@@ -268,7 +400,7 @@ async def run_text_turn(*, message: str, history: list[dict[str, Any]], session_
 
         result = await Runner.run(
             router_agent,
-            input=convo,
+            input=cast(Any, convo),
             context={"session_id": session_id},
         )
 
@@ -287,6 +419,8 @@ async def run_text_turn(*, message: str, history: list[dict[str, Any]], session_
             assistant_message=final_text,
             resume_link=resume_link,
             job_description_link=job_description_link,
+            resume_text=None,
+            job_description_text=None,
         )
 
         return final_text

@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 
-from workflow import run_text_turn
+from workflow import run_text_turn, initialize_mcp_servers, cleanup_mcp_servers
 from upload_routes import router as upload_router
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -33,8 +33,12 @@ def _to_sse(payload: dict) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await initialize_mcp_servers()
     logger.info("OpenAI agent runtime startup complete")
-    yield
+    try:
+        yield
+    finally:
+        await cleanup_mcp_servers()
 
 app = FastAPI(title="Interview Coach Agent", lifespan=lifespan)
 app.include_router(upload_router)

@@ -32,6 +32,8 @@ class SessionTurnUpdate(BaseModel):
     assistant_message: str
     resume_link: str | None = None
     job_description_link: str | None = None
+    resume_text: str | None = None
+    job_description_text: str | None = None
 
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", "./interviewcoach.db")
@@ -203,10 +205,10 @@ class InterviewSessionRepository:
         update_record = InterviewSessionModel(
             id=session.id,
             resume_link=payload.resume_link or session.resume_link,
-            resume_text=session.resume_text,
+            resume_text=payload.resume_text or session.resume_text,
             proceed_without_resume=session.proceed_without_resume,
             job_description_link=payload.job_description_link or session.job_description_link,
-            job_description_text=session.job_description_text,
+            job_description_text=payload.job_description_text or session.job_description_text,
             proceed_without_job_description=session.proceed_without_job_description,
             transcript=(
                 f"User: {payload.user_message.strip()}\n"
