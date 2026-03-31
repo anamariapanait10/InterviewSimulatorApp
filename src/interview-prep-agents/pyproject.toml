@@ -5,9 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "agent-framework-ag-ui>=1.0.0b260311",
-    "agent-framework-orchestrations>=1.0.0b260311",
     "fastapi>=0.135.1",
     "httpx>=0.28.1",
+    "openai>=2.0.0",
+    "openai-agents>=0.2.0",
     "uvicorn>=0.41.0",
 ]
