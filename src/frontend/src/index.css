@@ -1,7 +1,23 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Sora:wght@400;600;700&display=swap');
 
 :root {
-  line-height: 1.5;
+  /* Purple-based dark theme */
+  --primary: #a78bfa;
+  --primary-dark: #7c3aed;
+  --primary-darker: #6d28d9;
+  --secondary: #ec4899;
+  --accent: #06b6d4;
+  --background: #1b2438;
+  --surface: #273449;
+  --surface-light: #3c4d67;
+  --text: #f1f5f9;
+  --text-muted: #cbd5e1;
+  --border: #475569;
+  --success: #10b981;
+  --error: #ef4444;
+  --warning: #f59e0b;
+  
+  line-height: 1.6;
   font-weight: 400;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -30,17 +46,35 @@ body {
   width: 100%;
   min-height: 100vh;
   overflow-x: hidden;
-  background: #f6f1e7;
+  background: linear-gradient(135deg, #1b2438 0%, #26334b 50%, #22304a 100%);
+  color: var(--text);
+  font-family: 'Inter', 'Sora', sans-serif;
 }
 
 /* Remove default Vite styles that conflict with our design */
-h1 {
+h1, h2, h3 {
   margin: 0;
+  font-family: 'Sora', sans-serif;
+  font-weight: 700;
 }
 
 button {
   font-family: inherit;
   cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+a {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--primary-dark);
+}
+
+#root {
+  min-height: 100vh;
 }
 
 @media (prefers-reduced-motion: reduce) {
