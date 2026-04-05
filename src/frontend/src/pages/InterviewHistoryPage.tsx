@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { listInterviewHistory } from '../api'
+import { deleteInterview, listInterviewHistory } from '../api'
 import type { InterviewHistoryItem } from '../types'
 import './InterviewFlow.css'
 
@@ -8,6 +8,7 @@ export default function InterviewHistoryPage() {
   const [history, setHistory] = useState<InterviewHistoryItem[]>([])
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -35,6 +36,19 @@ export default function InterviewHistoryPage() {
       cancelled = true
     }
   }, [])
+
+  const handleDelete = async (sessionId: string) => {
+    setError(null)
+    setDeletingId(sessionId)
+    try {
+      await deleteInterview(sessionId)
+      setHistory((previous) => previous.filter((item) => item.id !== sessionId))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to delete interview')
+    } finally {
+      setDeletingId(null)
+    }
+  }
 
   if (isLoading) {
     return (
@@ -73,7 +87,7 @@ export default function InterviewHistoryPage() {
       ) : (
         <div className="history-grid">
           {history.map((item) => (
-            <NavLink key={item.id} to={`/interviews/${item.id}/details`} className="history-card">
+            <article key={item.id} className="history-card">
               <div className="history-card-head">
                 <p className="section-eyebrow">{item.role_title}</p>
                 <span className={item.is_completed ? 'status-dot complete' : 'status-dot pending'}>
@@ -96,7 +110,20 @@ export default function InterviewHistoryPage() {
                 </div>
               </div>
               <p className="history-date">{new Date(item.created_at).toLocaleString()}</p>
-            </NavLink>
+              <div className="history-actions">
+                <NavLink to={`/interviews/${item.id}/details`} className="secondary-button">
+                  Open
+                </NavLink>
+                <button
+                  type="button"
+                  className="delete-button"
+                  disabled={deletingId === item.id}
+                  onClick={() => void handleDelete(item.id)}
+                >
+                  {deletingId === item.id ? 'Deleting...' : 'Delete'}
+                </button>
+              </div>
+            </article>
           ))}
         </div>
       )}

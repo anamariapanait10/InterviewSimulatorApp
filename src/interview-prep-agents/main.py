@@ -84,6 +84,18 @@ class InterviewReportResponse(BaseModel):
     question_feedback: list[InterviewReportQuestionFeedback]
 
 
+class InterviewHelpRequest(BaseModel):
+    help_kind: str = Field(pattern="^(hint|model_answer)$")
+    role_title: str = Field(min_length=1)
+    question: InterviewPlanQuestion
+    resume_text: str = Field(min_length=1)
+    job_description_text: str = Field(min_length=1)
+
+
+class InterviewHelpResponse(BaseModel):
+    content: str
+
+
 def _to_sse(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
@@ -240,6 +252,53 @@ Rules:
         prompt=prompt,
     )
     return InterviewReportResponse.model_validate(parsed)
+
+
+@app.post("/interview/help", response_model=InterviewHelpResponse)
+async def build_interview_help(payload: InterviewHelpRequest):
+    intent_line = (
+        "Provide a short hint that points the user in the right direction without giving the full answer."
+        if payload.help_kind == "hint"
+        else "Provide a strong sample answer the user could study as the correct answer."
+    )
+
+    prompt = f"""
+You are helping a user answer an interview question.
+
+Role title: {payload.role_title}
+Question category: {payload.question.category}
+Question:
+{payload.question.prompt}
+
+Resume:
+{payload.resume_text}
+
+Job description:
+{payload.job_description_text}
+
+Task:
+{intent_line}
+
+Return strict JSON with this exact shape:
+{{
+  "content": "..."
+}}
+
+Rules:
+- For `hint`, keep it under 80 words and do not reveal the full answer.
+- For `model_answer`, keep it practical, polished, and specific.
+- Do not wrap the JSON in markdown fences.
+""".strip()
+
+    parsed = await _run_structured_prompt(
+        name="interview_helper",
+        instructions=(
+            "You support users during mock interviews. "
+            "Return only strict JSON matching the requested schema."
+        ),
+        prompt=prompt,
+    )
+    return InterviewHelpResponse.model_validate(parsed)
 
 @app.get("/health", response_class=fastapi.responses.PlainTextResponse)
 async def health_check():

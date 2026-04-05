@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { finishInterview, getInterview, submitInterviewAnswer } from '../api'
+import {
+  finishInterview,
+  getInterview,
+  getInterviewHint,
+  getInterviewModelAnswer,
+  submitInterviewAnswer,
+} from '../api'
 import type { InterviewSession } from '../types'
 import './InterviewFlow.css'
 
@@ -13,6 +19,10 @@ export default function InterviewRunPage() {
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [hint, setHint] = useState<string | null>(null)
+  const [modelAnswer, setModelAnswer] = useState<string | null>(null)
+  const [isLoadingHint, setIsLoadingHint] = useState(false)
+  const [isLoadingModelAnswer, setIsLoadingModelAnswer] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -27,6 +37,8 @@ export default function InterviewRunPage() {
           return
         }
         setSession(nextSession)
+        setHint(null)
+        setModelAnswer(null)
         if (nextSession.is_completed) {
           navigate(`/interviews/${nextSession.id}/summary`, { replace: true })
         }
@@ -76,10 +88,46 @@ export default function InterviewRunPage() {
 
       setSession(updated)
       setAnswer('')
+      setHint(null)
+      setModelAnswer(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to save your answer')
     } finally {
       setIsSubmitting(false)
+    }
+  }
+
+  const loadHint = async () => {
+    if (!session) {
+      return
+    }
+
+    setError(null)
+    setIsLoadingHint(true)
+    try {
+      const response = await getInterviewHint(session.id)
+      setHint(response.content)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load hint')
+    } finally {
+      setIsLoadingHint(false)
+    }
+  }
+
+  const loadModelAnswer = async () => {
+    if (!session) {
+      return
+    }
+
+    setError(null)
+    setIsLoadingModelAnswer(true)
+    try {
+      const response = await getInterviewModelAnswer(session.id)
+      setModelAnswer(response.content)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load model answer')
+    } finally {
+      setIsLoadingModelAnswer(false)
     }
   }
 
@@ -140,6 +188,39 @@ export default function InterviewRunPage() {
           Write your response in full sentences. The next step stores this answer and advances the
           interview.
         </p>
+
+        <div className="helper-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={isSubmitting || isLoadingHint || isLoadingModelAnswer}
+            onClick={() => void loadHint()}
+          >
+            {isLoadingHint ? 'Loading hint...' : 'Give Me a Hint'}
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={isSubmitting || isLoadingHint || isLoadingModelAnswer}
+            onClick={() => void loadModelAnswer()}
+          >
+            {isLoadingModelAnswer ? 'Loading answer...' : "I Don't Know the Answer"}
+          </button>
+        </div>
+
+        {hint && (
+          <article className="helper-card">
+            <p className="section-eyebrow">Hint</p>
+            <p>{hint}</p>
+          </article>
+        )}
+
+        {modelAnswer && (
+          <article className="helper-card">
+            <p className="section-eyebrow">Suggested Answer</p>
+            <p>{modelAnswer}</p>
+          </article>
+        )}
 
         <form className="answer-form" onSubmit={submit}>
           <label htmlFor="answer-input" className="field-label">

@@ -19,7 +19,7 @@
   right: -3rem;
   width: 18rem;
   height: 18rem;
-  background: radial-gradient(circle, rgba(35, 124, 112, 0.24), rgba(35, 124, 112, 0));
+  background: radial-gradient(circle, rgba(124, 58, 237, 0.28), rgba(124, 58, 237, 0));
 }
 
 .ambient-orb-two {
@@ -27,7 +27,7 @@
   left: -4rem;
   width: 20rem;
   height: 20rem;
-  background: radial-gradient(circle, rgba(217, 115, 77, 0.18), rgba(217, 115, 77, 0));
+  background: radial-gradient(circle, rgba(236, 72, 153, 0.2), rgba(236, 72, 153, 0));
 }
 
 .app-nav-wrap,
@@ -46,9 +46,9 @@
   padding: 1rem 1.25rem;
   border: 1px solid var(--line-soft);
   border-radius: 1.75rem;
-  background: rgba(249, 244, 235, 0.82);
+  background: rgba(30, 41, 59, 0.72);
   backdrop-filter: blur(18px);
-  box-shadow: 0 24px 60px rgba(31, 44, 56, 0.08);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.24);
 }
 
 .brand-block {
@@ -78,6 +78,37 @@
   gap: 0.65rem;
 }
 
+.auth-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-left: auto;
+}
+
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.72rem 1rem;
+  border-radius: 999px;
+  background: rgba(124, 58, 237, 0.12);
+  color: var(--ink-strong);
+  font-weight: 600;
+  border: 1px solid var(--line-soft);
+}
+
+.nav-action {
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 0.72rem 1rem;
+  background: rgba(39, 52, 73, 0.72);
+  color: var(--ink-strong);
+  font-weight: 600;
+}
+
+.nav-action:hover {
+  background: rgba(124, 58, 237, 0.14);
+}
+
 .nav-link {
   padding: 0.72rem 1.05rem;
   border-radius: 999px;
@@ -89,13 +120,13 @@
 .nav-link:hover {
   border-color: var(--line-soft);
   color: var(--ink-strong);
-  background: rgba(255, 255, 255, 0.55);
+  background: rgba(124, 58, 237, 0.08);
 }
 
 .nav-link.active {
-  background: var(--ink-strong);
+  background: linear-gradient(135deg, var(--accent-coral) 0%, var(--accent-gold) 100%);
   color: var(--paper);
-  box-shadow: 0 10px 24px rgba(31, 44, 56, 0.12);
+  box-shadow: 0 10px 24px rgba(124, 58, 237, 0.3);
 }
 
 .layout-main {
@@ -117,8 +148,21 @@
     width: 100%;
   }
 
+  .auth-nav {
+    width: 100%;
+    justify-content: stretch;
+    margin-left: 0;
+  }
+
   .nav-link {
     flex: 1;
+    text-align: center;
+  }
+
+  .nav-action,
+  .user-chip {
+    flex: 1;
+    justify-content: center;
     text-align: center;
   }
 }

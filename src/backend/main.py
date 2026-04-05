@@ -1,10 +1,15 @@
 import contextlib
+import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
+import sqlite3
 import tempfile
 import uuid
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from pathlib import Path
 from statistics import mean
 from typing import Any, AsyncIterator
@@ -18,6 +23,7 @@ import opentelemetry.instrumentation.fastapi as otel_fastapi
 import telemetry
 from pydantic import BaseModel, Field
 
+from auth_store import AuthRepository, UserModel
 from interview_data_store import (
     InterviewAnswerModel,
     InterviewQuestionFeedbackModel,
@@ -31,11 +37,14 @@ from interview_data_store import (
 
 
 repo = InterviewSessionRepository()
+auth_repo = AuthRepository()
 
 
 @contextlib.asynccontextmanager
 async def lifespan(app):
     telemetry.configure_opentelemetry()
+    await auth_repo.init_db()
+    await auth_repo.delete_expired_tokens()
     await repo.init_db()
     yield
 
@@ -168,6 +177,21 @@ class VoiceSessionRequest(BaseModel):
     instructions: str | None = None
 
 
+class RegisterRequest(BaseModel):
+    email: str = Field(min_length=3)
+    password: str = Field(min_length=8)
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3)
+    password: str = Field(min_length=8)
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: UserModel
+
+
 class ParsedDocumentResponse(BaseModel):
     file_name: str
     extracted_text: str
@@ -181,6 +205,11 @@ class InterviewCreateRequest(BaseModel):
 
 class InterviewAnswerRequest(BaseModel):
     answer_text: str = Field(min_length=1)
+
+
+class InterviewHelpResponse(BaseModel):
+    question_id: str
+    content: str
 
 
 class InterviewHistoryItem(BaseModel):
@@ -251,6 +280,62 @@ def _to_sentence_case(text: str) -> str:
 def _safe_excerpt(text: str, limit: int = 220) -> str:
     compact = _normalize_whitespace(text)
     return compact if len(compact) <= limit else f"{compact[:limit].rstrip()}..."
+
+
+def _normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    iterations = 200_000
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return (
+        f"{iterations}$"
+        f"{urlsafe_b64encode(salt).decode('ascii')}$"
+        f"{urlsafe_b64encode(digest).decode('ascii')}"
+    )
+
+
+def _verify_password(password: str, password_hash: str) -> bool:
+    try:
+        iterations_raw, salt_raw, digest_raw = password_hash.split("$", 2)
+        iterations = int(iterations_raw)
+        salt = urlsafe_b64decode(salt_raw.encode("ascii"))
+        expected = urlsafe_b64decode(digest_raw.encode("ascii"))
+    except Exception:
+        return False
+
+    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(actual, expected)
+
+
+def _issue_access_token() -> str:
+    return secrets.token_urlsafe(48)
+
+
+async def _get_current_user(authorization: str | None = fastapi.Header(default=None)) -> UserModel:
+    if not authorization:
+        raise fastapi.HTTPException(status_code=401, detail="Authentication required")
+
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise fastapi.HTTPException(status_code=401, detail="Invalid authentication scheme")
+
+    user = await auth_repo.get_user_by_token(token.strip())
+    if user is None:
+        raise fastapi.HTTPException(status_code=401, detail="Invalid or expired session")
+    return user
+
+
+async def _get_bearer_token(authorization: str | None = fastapi.Header(default=None)) -> str:
+    if not authorization:
+        raise fastapi.HTTPException(status_code=401, detail="Authentication required")
+
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise fastapi.HTTPException(status_code=401, detail="Invalid authentication scheme")
+    return token.strip()
 
 
 def _extract_role_title(job_description_text: str) -> str:
@@ -655,6 +740,67 @@ async def _generate_ai_report(
     return max(1, min(score, 100)), report
 
 
+async def _generate_ai_help(
+    help_kind: str,
+    session: InterviewSessionModel,
+    question: InterviewQuestionModel,
+) -> str | None:
+    try:
+        payload = await _post_agent_json(
+            "/interview/help",
+            {
+                "help_kind": help_kind,
+                "role_title": session.role_title or _extract_role_title(session.job_description_text or ""),
+                "question": question.model_dump(mode="json"),
+                "resume_text": session.resume_text or "",
+                "job_description_text": session.job_description_text or "",
+            },
+        )
+    except Exception:
+        logger.exception("agent interview help failed; using fallback help")
+        return None
+
+    content = _normalize_whitespace(str(payload.get("content") or ""))
+    return content or None
+
+
+def _build_hint(question: InterviewQuestionModel, session: InterviewSessionModel) -> str:
+    if question.category == "behavioral":
+        return (
+            "Use a tight STAR structure: set the situation, state the goal, explain the actions you personally took, "
+            "and close with a measurable result that connects back to the role."
+        )
+
+    skills = _extract_skill_keywords(session.resume_text or "", session.job_description_text or "", limit=3)
+    anchor = ", ".join(skills[:2]) if skills else "the core technologies in the job description"
+    return (
+        f"Anchor your answer around the main tradeoffs, implementation steps, and validation approach for {anchor}. "
+        "Mention how you would design, test, and monitor the solution."
+    )
+
+
+def _build_model_answer(question: InterviewQuestionModel, session: InterviewSessionModel) -> str:
+    role_title = session.role_title or _extract_role_title(session.job_description_text or "")
+    if question.category == "behavioral":
+        return (
+            "A strong answer would briefly establish the situation, explain the goal, and then focus on the actions "
+            "you personally took. For example: I was responsible for a high-priority deliverable with shifting "
+            "requirements, so I aligned stakeholders on the new scope, broke the work into smaller milestones, and "
+            "communicated risks early. That kept the team focused, reduced rework, and led to a successful outcome "
+            "with measurable impact. The key is to sound specific, show ownership, and finish with the result."
+        )
+
+    skills = _extract_skill_keywords(session.resume_text or "", session.job_description_text or "", limit=4)
+    primary_skill = skills[0] if skills else "the required stack"
+    return (
+        f"A strong answer for this {role_title.lower()} question would explain the approach end to end. Start by "
+        f"describing the problem and the main constraints, then propose a solution using {primary_skill}. After that, "
+        "cover tradeoffs such as performance, reliability, security, and developer velocity. Close by explaining how "
+        "you would test the implementation, monitor it in production, and iterate if the first version exposes new "
+        "risks. The best responses are concrete and pragmatic rather than purely theoretical."
+    )
+
+
 def _session_transcript_entry(question: InterviewQuestionModel, answer_text: str) -> str:
     return (
         f"Interviewer ({question.category.title()} Q{question.order}): {question.prompt.strip()}\n"
@@ -819,18 +965,65 @@ async def _parse_document_with_markitdown(file: fastapi.UploadFile) -> ParsedDoc
     return ParsedDocumentResponse(file_name=file.filename, extracted_text=extracted)
 
 
+@app.post("/api/auth/register", response_model=AuthResponse)
+async def register(payload: RegisterRequest):
+    email = _normalize_email(payload.email)
+    existing = await auth_repo.get_user_by_email(email)
+    if existing is not None:
+        raise fastapi.HTTPException(status_code=409, detail="An account with this email already exists")
+
+    try:
+        user = await auth_repo.create_user(email=email, password_hash=_hash_password(payload.password))
+    except sqlite3.IntegrityError as exc:
+        raise fastapi.HTTPException(status_code=409, detail="An account with this email already exists") from exc
+
+    token = _issue_access_token()
+    await auth_repo.issue_token(user.id, token)
+    return AuthResponse(token=token, user=user)
+
+
+@app.post("/api/auth/login", response_model=AuthResponse)
+async def login(payload: LoginRequest):
+    email = _normalize_email(payload.email)
+    user = await auth_repo.get_user_by_email(email)
+    if user is None or not _verify_password(payload.password, user.password_hash):
+        raise fastapi.HTTPException(status_code=401, detail="Invalid email or password")
+
+    public_user = UserModel.model_validate(user.model_dump())
+    token = _issue_access_token()
+    await auth_repo.issue_token(public_user.id, token)
+    return AuthResponse(token=token, user=public_user)
+
+
+@app.get("/api/auth/me", response_model=UserModel)
+async def get_me(current_user: UserModel = fastapi.Depends(_get_current_user)):
+    return current_user
+
+
+@app.post("/api/auth/logout")
+async def logout(token: str = fastapi.Depends(_get_bearer_token)):
+    await auth_repo.delete_token(token)
+    return {"ok": True}
+
+
 @app.post("/api/session/new", response_model=StartSessionResponse)
 async def start_session() -> StartSessionResponse:
     return StartSessionResponse(sessionId=str(uuid.uuid4()), systemPrompt=SYSTEM_PROMPT)
 
 
 @app.post("/api/interviews/parse-document", response_model=ParsedDocumentResponse)
-async def parse_document(file: fastapi.UploadFile = fastapi.File(...)):
+async def parse_document(
+    file: fastapi.UploadFile = fastapi.File(...),
+    _: UserModel = fastapi.Depends(_get_current_user),
+):
     return await _parse_document_with_markitdown(file)
 
 
 @app.post("/api/interviews", response_model=InterviewSessionModel)
-async def create_interview(payload: InterviewCreateRequest):
+async def create_interview(
+    payload: InterviewCreateRequest,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
     resume_text = payload.resume_text.strip()
     job_description_text = payload.job_description_text.strip()
 
@@ -845,6 +1038,7 @@ async def create_interview(payload: InterviewCreateRequest):
         role_title, questions = generated
 
     record = InterviewSessionModel(
+        user_id=current_user.id,
         resume_text=resume_text,
         job_description_text=job_description_text,
         interview_length=payload.interview_length,
@@ -858,22 +1052,29 @@ async def create_interview(payload: InterviewCreateRequest):
 
 
 @app.get("/api/interviews", response_model=list[InterviewHistoryItem])
-async def get_interview_history():
-    sessions = await repo.get_all_interview_sessions()
+async def get_interview_history(current_user: UserModel = fastapi.Depends(_get_current_user)):
+    sessions = await repo.get_all_interview_sessions(current_user.id)
     return [_history_item_from_session(session) for session in sessions]
 
 
 @app.get("/api/interviews/{session_id}", response_model=InterviewSessionModel)
-async def get_interview(session_id: UUID):
-    session = await repo.get_interview_session(session_id)
+async def get_interview(
+    session_id: UUID,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
+    session = await repo.get_interview_session(session_id, current_user.id)
     if session is None:
         raise fastapi.HTTPException(status_code=404, detail="Interview not found")
     return session
 
 
 @app.post("/api/interviews/{session_id}/answer", response_model=InterviewSessionModel)
-async def submit_interview_answer(session_id: UUID, payload: InterviewAnswerRequest):
-    session = await repo.get_interview_session(session_id)
+async def submit_interview_answer(
+    session_id: UUID,
+    payload: InterviewAnswerRequest,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
+    session = await repo.get_interview_session(session_id, current_user.id)
     if session is None:
         raise fastapi.HTTPException(status_code=404, detail="Interview not found")
     if session.is_completed:
@@ -897,10 +1098,12 @@ async def submit_interview_answer(session_id: UUID, payload: InterviewAnswerRequ
     updated = await repo.update_interview_session(
         InterviewSessionModel(
             id=session.id,
+            user_id=session.user_id,
             answers=[*session.answers, answer],
             current_question_index=session.current_question_index + 1,
             transcript=_session_transcript_entry(current_question, answer.answer_text),
-        )
+        ),
+        current_user.id,
     )
     if updated is None:
         raise fastapi.HTTPException(status_code=500, detail="Unable to save interview answer")
@@ -908,8 +1111,12 @@ async def submit_interview_answer(session_id: UUID, payload: InterviewAnswerRequ
 
 
 @app.post("/api/interviews/{session_id}/finish", response_model=InterviewSessionModel)
-async def finish_interview(session_id: UUID, payload: InterviewAnswerRequest):
-    session = await repo.get_interview_session(session_id)
+async def finish_interview(
+    session_id: UUID,
+    payload: InterviewAnswerRequest,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
+    session = await repo.get_interview_session(session_id, current_user.id)
     if session is None:
         raise fastapi.HTTPException(status_code=404, detail="Interview not found")
     if session.is_completed:
@@ -943,6 +1150,7 @@ async def finish_interview(session_id: UUID, payload: InterviewAnswerRequest):
     updated = await repo.update_interview_session(
         InterviewSessionModel(
             id=session.id,
+            user_id=session.user_id,
             answers=completed_answers,
             current_question_index=len(session.questions),
             score=score,
@@ -950,11 +1158,58 @@ async def finish_interview(session_id: UUID, payload: InterviewAnswerRequest):
             is_completed=True,
             completed_at=utcnow(),
             transcript=_session_transcript_entry(current_question, final_answer.answer_text),
-        )
+        ),
+        current_user.id,
     )
     if updated is None:
         raise fastapi.HTTPException(status_code=500, detail="Unable to finalize interview")
     return updated
+
+
+@app.delete("/api/interviews/{session_id}")
+async def delete_interview(
+    session_id: UUID,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
+    deleted = await repo.delete_interview_session(session_id, current_user.id)
+    if not deleted:
+        raise fastapi.HTTPException(status_code=404, detail="Interview not found")
+    return {"ok": True}
+
+
+@app.post("/api/interviews/{session_id}/hint", response_model=InterviewHelpResponse)
+async def get_question_hint(
+    session_id: UUID,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
+    session = await repo.get_interview_session(session_id, current_user.id)
+    if session is None:
+        raise fastapi.HTTPException(status_code=404, detail="Interview not found")
+    if session.is_completed or session.current_question_index >= len(session.questions):
+        raise fastapi.HTTPException(status_code=400, detail="No active question available")
+
+    question = session.questions[session.current_question_index]
+    content = await _generate_ai_help("hint", session, question)
+    return InterviewHelpResponse(question_id=question.id, content=content or _build_hint(question, session))
+
+
+@app.post("/api/interviews/{session_id}/model-answer", response_model=InterviewHelpResponse)
+async def get_question_model_answer(
+    session_id: UUID,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
+    session = await repo.get_interview_session(session_id, current_user.id)
+    if session is None:
+        raise fastapi.HTTPException(status_code=404, detail="Interview not found")
+    if session.is_completed or session.current_question_index >= len(session.questions):
+        raise fastapi.HTTPException(status_code=400, detail="No active question available")
+
+    question = session.questions[session.current_question_index]
+    content = await _generate_ai_help("model_answer", session, question)
+    return InterviewHelpResponse(
+        question_id=question.id,
+        content=content or _build_model_answer(question, session),
+    )
 
 
 @app.get("/api/interview-data/sessions/{session_id}", response_model=InterviewSessionModel)

@@ -1,7 +1,10 @@
 import { NavLink } from 'react-router-dom'
+import { useAuth } from '../auth'
 import './InterviewFlow.css'
 
 export default function HomePage() {
+  const { isAuthenticated } = useAuth()
+
   return (
     <section className="home-layout">
       <article className="hero-card">
@@ -12,12 +15,25 @@ export default function HomePage() {
           question at a time, and finish with a scored performance report.
         </p>
         <div className="hero-actions">
-          <NavLink to="/interviews/new" className="primary-button">
-            Configure Interview
-          </NavLink>
-          <NavLink to="/interviews/history" className="secondary-button">
-            View History
-          </NavLink>
+          {isAuthenticated ? (
+            <>
+              <NavLink to="/interviews/new" className="primary-button">
+                Configure Interview
+              </NavLink>
+              <NavLink to="/interviews/history" className="secondary-button">
+                View History
+              </NavLink>
+            </>
+          ) : (
+            <>
+              <NavLink to="/register" className="primary-button">
+                Create Account
+              </NavLink>
+              <NavLink to="/login" className="secondary-button">
+                Log In
+              </NavLink>
+            </>
+          )}
         </div>
       </article>
 

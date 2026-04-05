@@ -50,6 +50,7 @@ class InterviewReportModel(BaseModel):
 
 class InterviewSessionModel(BaseModel):
     id: UUID = Field(default_factory=uuid4)
+    user_id: UUID | None = None
     resume_link: str | None = None
     resume_text: str | None = None
     proceed_without_resume: bool = False
@@ -82,6 +83,7 @@ class SessionTurnUpdate(BaseModel):
 DATABASE_PATH = os.getenv("DATABASE_PATH", "./interviewcoach.db")
 
 OPTIONAL_COLUMNS: dict[str, str] = {
+    "user_id": "TEXT",
     "interview_length": "TEXT",
     "role_title": "TEXT",
     "questions_json": "TEXT NOT NULL DEFAULT '[]'",
@@ -158,6 +160,7 @@ def _row_to_model(row: aiosqlite.Row) -> InterviewSessionModel:
 
     return InterviewSessionModel(
         id=UUID(row["id"]),
+        user_id=UUID(row["user_id"]) if row["user_id"] else None,
         resume_link=row["resume_link"],
         resume_text=row["resume_text"],
         proceed_without_resume=bool(row["proceed_without_resume"]),
@@ -195,6 +198,7 @@ class InterviewSessionRepository:
                 """
                 CREATE TABLE IF NOT EXISTS InterviewSessions (
                     id TEXT PRIMARY KEY,
+                    user_id TEXT,
                     resume_link TEXT,
                     resume_text TEXT,
                     proceed_without_resume INTEGER NOT NULL DEFAULT 0,
@@ -227,6 +231,7 @@ class InterviewSessionRepository:
                 """
                 INSERT OR IGNORE INTO InterviewSessions (
                     id,
+                    user_id,
                     resume_link,
                     resume_text,
                     proceed_without_resume,
@@ -245,10 +250,11 @@ class InterviewSessionRepository:
                     created_at,
                     updated_at,
                     completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(record.id),
+                    str(record.user_id) if record.user_id else None,
                     record.resume_link,
                     record.resume_text,
                     int(record.proceed_without_resume),
@@ -271,27 +277,47 @@ class InterviewSessionRepository:
             )
             await conn.commit()
 
-        existing = await self.get_interview_session(record.id)
+        existing = await self.get_interview_session(record.id, record.user_id)
         if existing is None:
             raise RuntimeError("Failed to insert interview session")
         return existing
 
-    async def get_all_interview_sessions(self) -> list[InterviewSessionModel]:
+    async def get_all_interview_sessions(self, user_id: UUID | None = None) -> list[InterviewSessionModel]:
         async with aiosqlite.connect(DATABASE_PATH) as conn:
             conn.row_factory = aiosqlite.Row
-            cursor = await conn.execute("SELECT * FROM InterviewSessions ORDER BY created_at DESC")
+            if user_id is None:
+                cursor = await conn.execute("SELECT * FROM InterviewSessions ORDER BY created_at DESC")
+            else:
+                cursor = await conn.execute(
+                    "SELECT * FROM InterviewSessions WHERE user_id = ? ORDER BY created_at DESC",
+                    (str(user_id),),
+                )
             rows = await cursor.fetchall()
             return [_row_to_model(r) for r in rows]
 
-    async def get_interview_session(self, session_id: UUID) -> InterviewSessionModel | None:
+    async def get_interview_session(
+        self,
+        session_id: UUID,
+        user_id: UUID | None = None,
+    ) -> InterviewSessionModel | None:
         async with aiosqlite.connect(DATABASE_PATH) as conn:
             conn.row_factory = aiosqlite.Row
-            cursor = await conn.execute("SELECT * FROM InterviewSessions WHERE id = ?", (str(session_id),))
+            if user_id is None:
+                cursor = await conn.execute("SELECT * FROM InterviewSessions WHERE id = ?", (str(session_id),))
+            else:
+                cursor = await conn.execute(
+                    "SELECT * FROM InterviewSessions WHERE id = ? AND user_id = ?",
+                    (str(session_id), str(user_id)),
+                )
             row = await cursor.fetchone()
             return _row_to_model(row) if row else None
 
-    async def update_interview_session(self, record: InterviewSessionModel) -> InterviewSessionModel | None:
-        existing = await self.get_interview_session(record.id)
+    async def update_interview_session(
+        self,
+        record: InterviewSessionModel,
+        user_id: UUID | None = None,
+    ) -> InterviewSessionModel | None:
+        existing = await self.get_interview_session(record.id, user_id)
         if existing is None:
             return None
 
@@ -318,6 +344,7 @@ class InterviewSessionRepository:
 
         updated_record = InterviewSessionModel(
             id=existing.id,
+            user_id=pick("user_id"),
             resume_link=pick("resume_link"),
             resume_text=pick("resume_text"),
             proceed_without_resume=pick("proceed_without_resume"),
@@ -342,7 +369,8 @@ class InterviewSessionRepository:
             await conn.execute(
                 """
                 UPDATE InterviewSessions
-                SET resume_link = ?,
+                SET user_id = ?,
+                    resume_link = ?,
                     resume_text = ?,
                     proceed_without_resume = ?,
                     job_description_link = ?,
@@ -362,6 +390,7 @@ class InterviewSessionRepository:
                 WHERE id = ?
                 """,
                 (
+                    str(updated_record.user_id) if updated_record.user_id else None,
                     updated_record.resume_link,
                     updated_record.resume_text,
                     int(updated_record.proceed_without_resume),
@@ -384,10 +413,14 @@ class InterviewSessionRepository:
             )
             await conn.commit()
 
-        return await self.get_interview_session(record.id)
+        return await self.get_interview_session(record.id, user_id or existing.user_id)
 
-    async def complete_interview_session(self, session_id: UUID) -> InterviewSessionModel | None:
-        current = await self.get_interview_session(session_id)
+    async def complete_interview_session(
+        self,
+        session_id: UUID,
+        user_id: UUID | None = None,
+    ) -> InterviewSessionModel | None:
+        current = await self.get_interview_session(session_id, user_id)
         if current is None:
             return None
 
@@ -404,19 +437,25 @@ class InterviewSessionRepository:
             )
             await conn.commit()
 
-        return await self.get_interview_session(session_id)
+        return await self.get_interview_session(session_id, user_id or current.user_id)
 
-    async def ensure_session(self, session_id: UUID) -> InterviewSessionModel:
-        existing = await self.get_interview_session(session_id)
+    async def ensure_session(self, session_id: UUID, user_id: UUID | None = None) -> InterviewSessionModel:
+        existing = await self.get_interview_session(session_id, user_id)
         if existing is not None:
             return existing
-        return await self.add_interview_session(InterviewSessionModel(id=session_id))
+        return await self.add_interview_session(InterviewSessionModel(id=session_id, user_id=user_id))
 
-    async def append_turn(self, session_id: UUID, payload: SessionTurnUpdate) -> InterviewSessionModel:
-        session = await self.ensure_session(session_id)
+    async def append_turn(
+        self,
+        session_id: UUID,
+        payload: SessionTurnUpdate,
+        user_id: UUID | None = None,
+    ) -> InterviewSessionModel:
+        session = await self.ensure_session(session_id, user_id)
         updated = await self.update_interview_session(
             InterviewSessionModel(
                 id=session.id,
+                user_id=session.user_id,
                 resume_link=payload.resume_link or session.resume_link,
                 resume_text=payload.resume_text or session.resume_text,
                 proceed_without_resume=session.proceed_without_resume,
@@ -432,3 +471,20 @@ class InterviewSessionRepository:
         if updated is None:
             raise RuntimeError("Failed to update interview session")
         return updated
+
+    async def delete_interview_session(self, session_id: UUID, user_id: UUID | None = None) -> bool:
+        existing = await self.get_interview_session(session_id, user_id)
+        if existing is None:
+            return False
+
+        async with aiosqlite.connect(DATABASE_PATH) as conn:
+            if user_id is None:
+                await conn.execute("DELETE FROM InterviewSessions WHERE id = ?", (str(session_id),))
+            else:
+                await conn.execute(
+                    "DELETE FROM InterviewSessions WHERE id = ? AND user_id = ?",
+                    (str(session_id), str(user_id)),
+                )
+            await conn.commit()
+
+        return True

@@ -1,7 +1,10 @@
 import { NavLink, Outlet } from 'react-router-dom'
+import { useAuth } from './auth'
 import './App.css'
 
 export default function App() {
+  const { isAuthenticated, user, logout } = useAuth()
+
   return (
     <div className="app-shell">
       <div className="ambient-orb ambient-orb-one" />
@@ -30,6 +33,32 @@ export default function App() {
             History
           </NavLink>
         </nav>
+
+        <div className="auth-nav">
+          {isAuthenticated && user ? (
+            <>
+              <span className="user-chip">{user.email}</span>
+              <button type="button" className="nav-action" onClick={() => void logout()}>
+                Log Out
+              </button>
+            </>
+          ) : (
+            <>
+              <NavLink
+                to="/login"
+                className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+              >
+                Log In
+              </NavLink>
+              <NavLink
+                to="/register"
+                className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+              >
+                Register
+              </NavLink>
+            </>
+          )}
+        </div>
       </header>
 
       <main className="layout-main">

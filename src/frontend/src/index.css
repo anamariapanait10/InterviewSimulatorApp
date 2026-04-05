@@ -1,18 +1,21 @@
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Space+Grotesk:wght@400;500;700&display=swap');
 
 :root {
-  --paper: #f6efe2;
-  --paper-strong: #fffaf2;
-  --sand: #e6dcc8;
-  --line-soft: rgba(40, 53, 66, 0.12);
-  --line-strong: rgba(40, 53, 66, 0.2);
-  --ink-strong: #1f2c38;
-  --ink-soft: #5c6774;
-  --accent-coral: #d9734d;
-  --accent-coral-dark: #c35f39;
-  --accent-teal: #237c70;
-  --accent-gold: #c79b3b;
-  --surface-shadow: 0 24px 60px rgba(31, 44, 56, 0.08);
+  --paper: #ffffff;
+  --paper-strong: #f8fafc;
+  --sand: #273449;
+  --surface: rgba(39, 52, 73, 0.82);
+  --surface-light: rgba(60, 77, 103, 0.58);
+  --surface-strong: #1e293b;
+  --line-soft: rgba(148, 163, 184, 0.26);
+  --line-strong: rgba(148, 163, 184, 0.4);
+  --ink-strong: #f1f5f9;
+  --ink-soft: #cbd5e1;
+  --accent-coral: #7c3aed;
+  --accent-coral-dark: #6d28d9;
+  --accent-teal: #a78bfa;
+  --accent-gold: #ec4899;
+  --surface-shadow: 0 24px 60px rgba(0, 0, 0, 0.22);
   --font-display: 'Fraunces', serif;
   --font-body: 'Space Grotesk', sans-serif;
 
@@ -39,9 +42,9 @@ body,
 body {
   min-height: 100vh;
   background:
-    radial-gradient(circle at top left, rgba(217, 115, 77, 0.12), transparent 28%),
-    radial-gradient(circle at 90% 15%, rgba(35, 124, 112, 0.14), transparent 24%),
-    linear-gradient(180deg, #fbf7f0 0%, #f4ecde 45%, #efe4d3 100%);
+    radial-gradient(circle at top left, rgba(124, 58, 237, 0.2), transparent 28%),
+    radial-gradient(circle at 90% 15%, rgba(236, 72, 153, 0.16), transparent 24%),
+    linear-gradient(180deg, #1b2438 0%, #26334b 48%, #22304a 100%);
   color: var(--ink-strong);
   font-family: var(--font-body);
 }
@@ -86,7 +89,7 @@ input:focus,
 select:focus,
 button:focus-visible,
 a:focus-visible {
-  box-shadow: 0 0 0 3px rgba(35, 124, 112, 0.18);
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.22);
 }
 
 @media (prefers-reduced-motion: reduce) {

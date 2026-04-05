@@ -1,3 +1,14 @@
+export interface User {
+  id: string
+  email: string
+  created_at: string
+}
+
+export interface AuthResponse {
+  token: string
+  user: User
+}
+
 export interface InterviewQuestion {
   id: string
   order: number
@@ -33,6 +44,7 @@ export interface InterviewReport {
 
 export interface InterviewSession {
   id: string
+  user_id: string | null
   resume_text: string | null
   job_description_text: string | null
   interview_length: 'short' | 'medium' | 'long' | null
@@ -62,4 +74,9 @@ export interface InterviewHistoryItem {
 export interface ParsedDocumentResponse {
   file_name: string
   extracted_text: string
+}
+
+export interface InterviewHelpResponse {
+  question_id: string
+  content: string
 }
