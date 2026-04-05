@@ -1,38 +1,33 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import './App.css'
-function HomeWelcome() {
-  return (
-    <section className="home-welcome">
-      <p className="kicker">Practice Smarter</p>
-      <h1>Your AI Interview Lab</h1>
-      <p>
-        Upload your resume, align with a job description, and run realistic mock interviews with coaching
-        feedback in real time.
-      </p>
-      <NavLink to="/coach-chat" className="primary-link">
-        Open Coach Chat
-      </NavLink>
-    </section>
-  )
-}
 
-function App() {
+export default function App() {
   return (
     <div className="app-shell">
+      <div className="ambient-orb ambient-orb-one" />
+      <div className="ambient-orb ambient-orb-two" />
+
       <header className="app-nav-wrap">
-        <div className="brand-block">
+        <NavLink to="/" className="brand-block">
           <p className="brand-overline">Interview Simulator</p>
-          <p className="brand-title">Career Craft Studio</p>
-        </div>
+          <p className="brand-title">Session Atelier</p>
+        </NavLink>
+
         <nav className="app-nav" aria-label="Main navigation">
           <NavLink to="/" end className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
             Home
           </NavLink>
           <NavLink
-            to="/coach-chat"
+            to="/interviews/new"
             className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
           >
-            Coach Chat
+            Configure
+          </NavLink>
+          <NavLink
+            to="/interviews/history"
+            className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+          >
+            History
           </NavLink>
         </nav>
       </header>
@@ -43,7 +38,3 @@ function App() {
     </div>
   )
 }
-
-export { HomeWelcome }
-
-export default App

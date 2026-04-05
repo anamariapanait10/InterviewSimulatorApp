@@ -7,6 +7,7 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "fastapi[standard]>=0.119.0",
     "httpx>=0.28.1",
+    "markitdown[pdf,docx]>=0.1.5",
     "opentelemetry-distro>=0.59b0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.38.0",
     "opentelemetry-instrumentation-fastapi>=0.59b0",
