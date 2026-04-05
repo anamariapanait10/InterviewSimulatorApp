@@ -223,7 +223,7 @@ Answers:
 
 Return JSON with this exact shape:
 {{
-  "score": 82,
+  "score": <integer 1-100>,
   "summary": "2-3 sentence summary",
   "strengths": ["...", "...", "..."],
   "improvements": ["...", "...", "..."],
@@ -237,7 +237,7 @@ Return JSON with this exact shape:
 }}
 
 Rules:
-- Score must be an integer from 1 to 100.
+- Score must be an integer from 1 to 100. It must reflect the quality of the answer, taking into account the relevance, depth and clarity of the response. Use the full range (avoid clustering scores unless justified). Do not give scores above 90 unless the answer is clearly outstanding.
 - Include one question_feedback item per answer.
 - Keep strengths and improvements concrete and actionable.
 - Do not wrap the JSON in markdown fences.

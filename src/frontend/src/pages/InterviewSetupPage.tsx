@@ -86,7 +86,6 @@ function SourceCard(props: {
           {value.fileName && (
             <div className="parsed-preview">
               <strong>{value.fileName}</strong>
-              <p>{value.text.slice(0, 260)}{value.text.length > 260 ? '...' : ''}</p>
             </div>
           )}
         </div>
@@ -169,10 +168,9 @@ export default function InterviewSetupPage() {
     <section className="setup-layout">
       <article className="flow-card intro-card">
         <p className="section-eyebrow">Interview Setup</p>
-        <h1>Build the interview before the first question appears.</h1>
-        <p className="support-copy">
-          Load your candidate context, select the pacing, and start a deterministic interview flow with
-          one question per step.
+        <h1>Configure the interview parameters.</h1>
+        <p className="support-copy mt-2">
+          Load your candidate context, select the interview length, and start the interview flow
         </p>
       </article>
 
@@ -202,10 +200,10 @@ export default function InterviewSetupPage() {
         <div className="section-head">
           <div>
             <p className="section-eyebrow">Interview Length</p>
-            <h2>Choose the pacing</h2>
+            <h2>Choose the interview length</h2>
           </div>
         </div>
-        <div className="length-grid">
+        <div className="length-grid mt-2">
           {LENGTH_OPTIONS.map((option) => (
             <button
               key={option.value}
@@ -213,7 +211,7 @@ export default function InterviewSetupPage() {
               className={interviewLength === option.value ? 'length-option active' : 'length-option'}
               onClick={() => setInterviewLength(option.value)}
             >
-              <strong>{option.title}</strong>
+              <strong style={{ color: "white" }}>{option.title}</strong>
               <span>{option.description}</span>
             </button>
           ))}

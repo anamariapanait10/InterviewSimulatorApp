@@ -24,8 +24,7 @@
 
 .hero-card {
   padding: clamp(2rem, 4vw, 3.5rem);
-  min-height: 24rem;
-  align-content: end;
+  align-content: start;
   background:
     linear-gradient(135deg, rgba(30, 41, 59, 0.94), rgba(39, 52, 73, 0.9)),
     radial-gradient(circle at top right, rgba(236, 72, 153, 0.18), transparent 30%);
@@ -48,7 +47,7 @@
 }
 
 .support-copy {
-  max-width: 62ch;
+  max-width: 90%;
   color: var(--ink-soft);
   line-height: 1.7;
 }
@@ -70,6 +69,7 @@
 .hero-actions,
 .footer-actions {
   flex-wrap: wrap;
+  margin-top: 10px;
 }
 
 .primary-button,
@@ -502,4 +502,9 @@
     justify-content: center;
     text-align: center;
   }
+}
+
+
+.mt-2 {
+  margin-top: 0.5rem;
 }
