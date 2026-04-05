@@ -24,7 +24,7 @@ export default function App() {
             to="/interviews/new"
             className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
           >
-            Configure
+            Start Interview
           </NavLink>
           <NavLink
             to="/interviews/history"

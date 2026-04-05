@@ -25,7 +25,7 @@ export default function RegisterPage() {
 
     try {
       await register(email, password)
-      navigate('/interviews/history', { replace: true })
+      navigate('/', { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to register')
     } finally {
