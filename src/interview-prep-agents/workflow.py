@@ -10,6 +10,8 @@ from typing import Any, cast
 import httpx
 from agents.mcp import MCPServerStreamableHttp
 from agents import Runner, Agent
+from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
+from upload_urls import rewrite_attachment_urls_for_agent
 logger = logging.getLogger("interview-prep-agents.workflow")
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
@@ -114,13 +116,14 @@ def _build_orchestrator_agent() -> Any:
 
     behavioral_agent = Agent(
         name="behavioral",
-        instructions=(
+        instructions=prompt_with_handoff_instructions(
             "You are a behavioral interviewer. "
-            "Ask STAR-method questions tailored to the candidate's background. "
+            "Ask four STAR-method questions tailored to the candidate's background. "
             "Use InterviewData tools to read session context and store answers. "
             "Ask one question at a time. "
-            "When the behavioral portion is done, hand off to the technical interviewer. "
-            "If the user asks for setup help or changes topic unexpectedly, hand back to the orchestrator."
+            "When the behavioral portion is done, immediately call the handoff tool to transfer to the technical interviewer. "
+            "Do not end by wishing the user luck or saying that there is a next phase without transferring. "
+            "If the user asks for setup help or changes topic unexpectedly, call the handoff tool to transfer back to the orchestrator."
         ),
         model=OPENAI_MODEL,
         mcp_servers=_mcp_servers,
@@ -128,15 +131,14 @@ def _build_orchestrator_agent() -> Any:
 
     technical_agent = Agent(
         name="technical",
-        instructions=(
-            """
+        instructions=prompt_with_handoff_instructions(
             "You are a technical interviewer. "
-            "Ask role-specific technical questions based on the stored resume and job description. "
+            "Ask four role-specific technical questions based on the stored resume and job description. "
             "Use InterviewData tools to read session state and save the candidate's answers. "
             "Ask one question at a time. "
-            "When the technical round is complete, hand off to the summarizer. "
-            "If the conversation goes off-path, hand back to the orchestrator."
-            """
+            "When the technical round is complete, immediately call the handoff tool to transfer to the summarizer. "
+            "Do not end by telling the user there is a next phase without transferring. "
+            "If the conversation goes off-path, call the handoff tool to transfer back to the orchestrator."
         ),
         model=OPENAI_MODEL,
         mcp_servers=_mcp_servers,
@@ -156,7 +158,7 @@ def _build_orchestrator_agent() -> Any:
 
     _orchestrator_agent = Agent(
         name="orchestrator",
-        instructions=(
+        instructions=prompt_with_handoff_instructions(
             """
             You are the Interview Orchestrator for an AI Interview Coach system.
 
@@ -185,8 +187,9 @@ def _build_orchestrator_agent() -> Any:
             - Do NOT route to an agent whose phase has already been completed.
             - When a specialist hands back, treat that phase as COMPLETE and advance to the next one.
             - If the user explicitly requests a specific phase, honour that request.
-            - If the user wants to end, hand off to "summariser".
+            - If the user wants to end, hand off to the summarizer.
             - If the user's request is unexpected or unclear, briefly ask what they'd like to do.
+            - When routing is clear, call the handoff tool immediately instead of only describing the next step.
 
             Routing rules (apply in order, skipping completed phases):
             - If session setup or document intake has NOT been completed
@@ -217,6 +220,9 @@ def _build_orchestrator_agent() -> Any:
         handoffs=[behavioral_agent, technical_agent, summarizer],
     )
 
+    behavioral_agent.handoffs = [technical_agent, _orchestrator_agent]
+    technical_agent.handoffs = [summarizer, _orchestrator_agent]
+
     return _orchestrator_agent
 
 
@@ -229,7 +235,7 @@ def _normalize_history(history: list[dict[str, Any]]) -> list[dict[str, str]]:
             continue
         if not isinstance(content, str) or not content.strip():
             continue
-        normalized.append({"role": role, "content": content})
+        normalized.append({"role": role, "content": rewrite_attachment_urls_for_agent(content)})
     return normalized
 
 
@@ -256,6 +262,15 @@ def _extract_attachment_links(message: str) -> tuple[str | None, str | None]:
             job_description_link = value
 
     return resume_link, job_description_link
+
+
+def _extract_message_body(message: str) -> str:
+    body_lines: list[str] = []
+    for line in message.splitlines():
+        if line.strip().lower().startswith("attachment url:"):
+            continue
+        body_lines.append(line)
+    return "\n".join(body_lines).strip()
 
 
 def _to_mcp_endpoint(base_url: str) -> str:
@@ -322,18 +337,65 @@ async def _ensure_and_load_session(session_id: str) -> dict[str, Any]:
 def _build_context_system_message(session: dict[str, Any]) -> dict[str, str]:
     resume_link = session.get("resume_link") or "none"
     job_link = session.get("job_description_link") or "none"
+    resume_text = (session.get("resume_text") or "").strip()
+    job_text = (session.get("job_description_text") or "").strip()
     transcript = session.get("transcript") or ""
     transcript_tail = transcript[-1600:] if transcript else ""
+    resume_text_tail = resume_text[-1200:] if resume_text else ""
+    job_text_tail = job_text[-1600:] if job_text else ""
 
     return {
         "role": "system",
         "content": (
             "Interview session context from persistence layer. "
             f"resume_link={resume_link}; job_description_link={job_link}. "
+            f"resume_text_present={'yes' if resume_text else 'no'}; "
+            f"job_description_text_present={'yes' if job_text else 'no'}. "
+            "If these fields are present, treat them as already stored and do not ask the user to re-send them. "
+            f"Resume text excerpt:\n{resume_text_tail}\n\n"
+            f"Job description excerpt:\n{job_text_tail}\n\n"
             "Use this context to keep continuity across turns. "
             f"Transcript tail:\n{transcript_tail}"
         ),
     }
+
+
+async def _update_session_fields(
+    *,
+    session: dict[str, Any],
+    resume_link: str | None = None,
+    job_description_link: str | None = None,
+    resume_text: str | None = None,
+    job_description_text: str | None = None,
+) -> dict[str, Any]:
+    session_uuid = str(uuid.UUID(str(session["id"])))
+    payload = {
+        "record": {
+            "id": session_uuid,
+            "resume_link": resume_link if resume_link is not None else session.get("resume_link"),
+            "resume_text": resume_text if resume_text is not None else session.get("resume_text"),
+            "proceed_without_resume": bool(session.get("proceed_without_resume")),
+            "job_description_link": (
+                job_description_link
+                if job_description_link is not None
+                else session.get("job_description_link")
+            ),
+            "job_description_text": (
+                job_description_text
+                if job_description_text is not None
+                else session.get("job_description_text")
+            ),
+            "proceed_without_job_description": bool(session.get("proceed_without_job_description")),
+            "transcript": None,
+            "is_completed": bool(session.get("is_completed")),
+        }
+    }
+    url = f"{BACKEND_BASE_URL}{BACKEND_INTERVIEW_DATA_API_PREFIX}/update_interview_session"
+    return await _post_json_with_diagnostics(
+        operation="update_session_fields",
+        url=url,
+        payload=payload,
+    )
 
 
 async def _append_turn(
@@ -380,6 +442,9 @@ async def _get_session_lock(session_id: str) -> asyncio.Lock:
 
 async def run_text_turn(*, message: str, history: list[dict[str, Any]], session_id: str) -> str:
     await initialize_mcp_servers()
+    normalized_message = rewrite_attachment_urls_for_agent(message)
+    resume_link, job_description_link = _extract_attachment_links(normalized_message)
+    message_body = _extract_message_body(normalized_message)
 
     try:
         agents_sdk = importlib.import_module("agents")
@@ -393,10 +458,28 @@ async def run_text_turn(*, message: str, history: list[dict[str, Any]], session_
     lock = await _get_session_lock(session_id)
     async with lock:
         session = await _ensure_and_load_session(session_id)
+        job_description_text = None
+
+        # When the user uploads a resume and types the JD in the same turn,
+        # persist both before the model runs so the agent can rely on session state.
+        if resume_link and message_body and not session.get("job_description_text"):
+            job_description_text = message_body
+
+        if (
+            (resume_link and resume_link != session.get("resume_link"))
+            or (job_description_link and job_description_link != session.get("job_description_link"))
+            or (job_description_text and job_description_text != session.get("job_description_text"))
+        ):
+            session = await _update_session_fields(
+                session=session,
+                resume_link=resume_link,
+                job_description_link=job_description_link,
+                job_description_text=job_description_text,
+            )
 
         convo = _normalize_history(history)
         convo.insert(0, _build_context_system_message(session))
-        convo.append({"role": "user", "content": message})
+        convo.append({"role": "user", "content": normalized_message})
 
         result = await Runner.run(
             router_agent,
@@ -412,15 +495,14 @@ async def run_text_turn(*, message: str, history: list[dict[str, Any]], session_
         else:
             final_text = str(final_output)
 
-        resume_link, job_description_link = _extract_attachment_links(message)
         await _append_turn(
             session_id=session_id,
-            user_message=message,
+            user_message=normalized_message,
             assistant_message=final_text,
             resume_link=resume_link,
             job_description_link=job_description_link,
             resume_text=None,
-            job_description_text=None,
+            job_description_text=job_description_text,
         )
 
         return final_text
