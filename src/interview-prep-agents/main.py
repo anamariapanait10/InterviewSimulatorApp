@@ -1,33 +1,17 @@
-import os
-import json
-import logging
+from typing import Any
 import fastapi
 import fastapi.responses
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
-from contextlib import asynccontextmanager
-from agents import Agent, Runner
 
-from workflow import run_text_turn, initialize_mcp_servers, cleanup_mcp_servers
+from workflow import (
+    build_coding_reply_with_agent,
+    build_interview_help_with_agent,
+    build_interview_plan_with_agent,
+    build_interview_report_with_agent,
+    evaluate_coding_round_with_agent,
+)
 from upload_routes import router as upload_router
-
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
-logger = logging.getLogger("interview-prep-agents")
-
-for key, value in os.environ.items():
-    logger.info("Env var %s=%s", key, value)
-
-
-class ChatInputMessage(BaseModel):
-    role: str
-    content: str
-
-
-class ChatStreamRequest(BaseModel):
-    session_id: str = Field(min_length=1)
-    message: str = Field(min_length=1)
-    history: list[ChatInputMessage] = Field(default_factory=list)
-
 
 class InterviewPlanQuestion(BaseModel):
     id: str
@@ -70,6 +54,8 @@ class InterviewReportRequest(BaseModel):
     role_title: str = Field(min_length=1)
     questions: list[InterviewPlanQuestion] = Field(default_factory=list)
     answers: list[InterviewAnswerPayload] = Field(default_factory=list)
+    coding_feedback_input: str | None = None
+    coding_hire_recommendation: str | None = None
 
 
 class InterviewReportResponse(BaseModel):
@@ -82,6 +68,8 @@ class InterviewReportResponse(BaseModel):
     communication_feedback: str
     recommendation: str
     question_feedback: list[InterviewReportQuestionFeedback]
+    coding_feedback: str = ""
+    hire_recommendation: str = ""
 
 
 class InterviewHelpRequest(BaseModel):
@@ -96,213 +84,138 @@ class InterviewHelpResponse(BaseModel):
     content: str
 
 
-def _to_sse(payload: dict) -> str:
-    return f"data: {json.dumps(payload)}\n\n"
+class CodingConversationTurnPayload(BaseModel):
+    role: str
+    content: str
+    kind: str | None = None
+    source_event_type: str | None = None
+    severity: str | None = None
 
 
-def _strip_json_fence(text: str) -> str:
-    candidate = text.strip()
-    if candidate.startswith("```"):
-        candidate = candidate.split("\n", 1)[1] if "\n" in candidate else candidate
-        if candidate.endswith("```"):
-            candidate = candidate[:-3]
-    return candidate.strip()
+class CodingReplyRequest(BaseModel):
+    interviewer_prompt: str = ""
+    interviewer_mode: str = "neutral"
+    problem_title: str = Field(min_length=1)
+    problem_prompt: str = Field(min_length=1)
+    problem_constraints: list[str] = Field(default_factory=list)
+    problem_examples: list[dict[str, Any]] = Field(default_factory=list)
+    edge_case_hints: list[str] = Field(default_factory=list)
+    complexity_target: str | None = None
+    recent_event_types: list[str] = Field(default_factory=list)
+    transcript_recent: str = ""
+    current_code: str = ""
+    conversation: list[CodingConversationTurnPayload] = Field(default_factory=list)
+    forced_followup: str | None = None
 
 
-async def _run_structured_prompt(*, name: str, instructions: str, prompt: str) -> dict:
-    agent = Agent(name=name, instructions=instructions, model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"))
-    result = await Runner.run(agent, input=prompt)
-    final_output = getattr(result, "final_output", "")
-    if isinstance(final_output, str):
-        text = final_output
-    elif final_output is None:
-        text = ""
-    else:
-        text = str(final_output)
+class CodingReplyResponse(BaseModel):
+    reply: str
 
-    parsed = json.loads(_strip_json_fence(text))
-    if not isinstance(parsed, dict):
-        raise RuntimeError("Model did not return a JSON object")
-    return parsed
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await initialize_mcp_servers()
-    logger.info("OpenAI agent runtime startup complete")
-    try:
-        yield
-    finally:
-        await cleanup_mcp_servers()
+class CodingEvaluationRequest(BaseModel):
+    problem_title: str = Field(min_length=1)
+    problem_prompt: str = Field(min_length=1)
+    difficulty: str = Field(min_length=1)
+    language: str = Field(min_length=1)
+    complexity_target: str | None = None
+    current_code: str = ""
+    transcript: str = ""
+    conversation: list[dict[str, Any]] = Field(default_factory=list)
+    event_log: list[dict[str, Any]] = Field(default_factory=list)
 
-app = FastAPI(title="Interview Coach Agent", lifespan=lifespan)
+
+class CodingEvaluationResponse(BaseModel):
+    communication: int
+    problem_solving: int
+    coding: int
+    complexity_analysis: int
+    debugging: int
+    edge_cases: int
+    overall_score: int
+    hire_recommendation: str
+    summary: str
+    strengths: list[str] = Field(default_factory=list)
+    concerns: list[str] = Field(default_factory=list)
+
+app = FastAPI(title="Interview Coach Agent")
 app.include_router(upload_router)
-
-
-@app.post("/chat/stream")
-async def stream_chat(payload: ChatStreamRequest):
-    async def event_generator():
-        yield _to_sse({"type": "start", "sessionId": payload.session_id})
-        try:
-            answer = await run_text_turn(
-                message=payload.message,
-                history=[m.model_dump() for m in payload.history],
-                session_id=payload.session_id,
-            )
-            if answer:
-                yield _to_sse({"type": "delta", "delta": answer})
-            yield _to_sse({"type": "done"})
-        except Exception as exc:
-            logger.exception("text turn failed")
-            yield _to_sse({"type": "error", "error": str(exc) or "Agent execution failed"})
-
-    return fastapi.responses.StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.post("/interview/plan", response_model=InterviewPlanResponse)
 async def build_interview_plan(payload: InterviewPlanRequest):
-    prompt = f"""
-Create a complete interview plan as strict JSON.
-
-Interview length: {payload.interview_length}
-Behavioral questions required: {payload.behavioral_count}
-Technical questions required: {payload.technical_count}
-
-Resume:
-{payload.resume_text}
-
-Job description:
-{payload.job_description_text}
-
-Return JSON with this exact shape:
-{{
-  "role_title": "short role title",
-  "questions": [
-    {{"id": "behavioral-1", "category": "behavioral", "prompt": "..."}} ,
-    {{"id": "technical-1", "category": "technical", "prompt": "..."}}
-  ]
-}}
-
-Rules:
-- Return exactly {payload.behavioral_count + payload.technical_count} questions.
-- The first {payload.behavioral_count} must be behavioral.
-- The remaining {payload.technical_count} must be technical.
-- Each question must be tailored to the candidate and role.
-- Do not wrap the JSON in markdown fences.
-""".strip()
-
-    parsed = await _run_structured_prompt(
-        name="interview_planner",
-        instructions=(
-            "You create tailored interview plans. "
-            "Return only valid JSON that matches the user's requested schema."
-        ),
-        prompt=prompt,
+    parsed = await build_interview_plan_with_agent(
+        resume_text=payload.resume_text,
+        job_description_text=payload.job_description_text,
+        interview_length=payload.interview_length,
+        behavioral_count=payload.behavioral_count,
+        technical_count=payload.technical_count,
     )
     return InterviewPlanResponse.model_validate(parsed)
 
 
 @app.post("/interview/report", response_model=InterviewReportResponse)
 async def build_interview_report(payload: InterviewReportRequest):
-    prompt = f"""
-Evaluate the completed interview and return strict JSON only.
-
-Role title: {payload.role_title}
-Interview length: {payload.interview_length}
-
-Resume:
-{payload.resume_text}
-
-Job description:
-{payload.job_description_text}
-
-Questions:
-{json.dumps([item.model_dump(mode="json") for item in payload.questions], ensure_ascii=True, indent=2)}
-
-Answers:
-{json.dumps([item.model_dump(mode="json") for item in payload.answers], ensure_ascii=True, indent=2)}
-
-Return JSON with this exact shape:
-{{
-  "score": <integer 1-100>,
-  "summary": "2-3 sentence summary",
-  "strengths": ["...", "...", "..."],
-  "improvements": ["...", "...", "..."],
-  "behavioral_feedback": "...",
-  "technical_feedback": "...",
-  "communication_feedback": "...",
-  "recommendation": "...",
-  "question_feedback": [
-    {{"question_id": "behavioral-1", "score": 8, "feedback": "..."}}
-  ]
-}}
-
-Rules:
-- Score must be an integer from 1 to 100. It must reflect the quality of the answer, taking into account the relevance, depth and clarity of the response. Use the full range (avoid clustering scores unless justified). Do not give scores above 90 unless the answer is clearly outstanding.
-- Include one question_feedback item per answer.
-- Keep strengths and improvements concrete and actionable.
-- Do not wrap the JSON in markdown fences.
-""".strip()
-
-    parsed = await _run_structured_prompt(
-        name="interview_evaluator",
-        instructions=(
-            "You evaluate mock interviews and return only strict JSON. "
-            "Be specific, fair, and pragmatic."
-        ),
-        prompt=prompt,
+    parsed = await build_interview_report_with_agent(
+        role_title=payload.role_title,
+        interview_length=payload.interview_length,
+        resume_text=payload.resume_text,
+        job_description_text=payload.job_description_text,
+        questions=[item.model_dump(mode="json") for item in payload.questions],
+        answers=[item.model_dump(mode="json") for item in payload.answers],
+        coding_feedback_input=payload.coding_feedback_input,
+        coding_hire_recommendation=payload.coding_hire_recommendation,
     )
     return InterviewReportResponse.model_validate(parsed)
 
 
 @app.post("/interview/help", response_model=InterviewHelpResponse)
 async def build_interview_help(payload: InterviewHelpRequest):
-    intent_line = (
-        "Provide a short hint that points the user in the right direction without giving the full answer."
-        if payload.help_kind == "hint"
-        else "Provide a strong sample answer the user could study as the correct answer."
-    )
-
-    prompt = f"""
-You are helping a user answer an interview question.
-
-Role title: {payload.role_title}
-Question category: {payload.question.category}
-Question:
-{payload.question.prompt}
-
-Resume:
-{payload.resume_text}
-
-Job description:
-{payload.job_description_text}
-
-Task:
-{intent_line}
-
-Return strict JSON with this exact shape:
-{{
-  "content": "..."
-}}
-
-Rules:
-- For `hint`, keep it under 80 words and do not reveal the full answer.
-- For `model_answer`, keep it practical, polished, and specific.
-- Do not wrap the JSON in markdown fences.
-""".strip()
-
-    parsed = await _run_structured_prompt(
-        name="interview_helper",
-        instructions=(
-            "You support users during mock interviews. "
-            "Return only strict JSON matching the requested schema."
-        ),
-        prompt=prompt,
+    parsed = await build_interview_help_with_agent(
+        help_kind=payload.help_kind,
+        role_title=payload.role_title,
+        question=payload.question.model_dump(mode="json"),
+        resume_text=payload.resume_text,
+        job_description_text=payload.job_description_text,
     )
     return InterviewHelpResponse.model_validate(parsed)
+
+
+@app.post("/coding/reply", response_model=CodingReplyResponse)
+async def build_coding_reply(payload: CodingReplyRequest):
+    parsed = await build_coding_reply_with_agent(
+        interviewer_prompt=payload.interviewer_prompt,
+        interviewer_mode=payload.interviewer_mode,
+        problem_title=payload.problem_title,
+        problem_prompt=payload.problem_prompt,
+        problem_constraints=payload.problem_constraints,
+        problem_examples=payload.problem_examples,
+        edge_case_hints=payload.edge_case_hints,
+        complexity_target=payload.complexity_target,
+        recent_event_types=payload.recent_event_types,
+        transcript_recent=payload.transcript_recent,
+        current_code=payload.current_code,
+        conversation=[turn.model_dump(mode="json") for turn in payload.conversation],
+        forced_followup=payload.forced_followup,
+    )
+    return CodingReplyResponse.model_validate(parsed)
+
+
+@app.post("/coding/evaluate", response_model=CodingEvaluationResponse)
+async def build_coding_evaluation(payload: CodingEvaluationRequest):
+    parsed = await evaluate_coding_round_with_agent(
+        problem_title=payload.problem_title,
+        problem_prompt=payload.problem_prompt,
+        difficulty=payload.difficulty,
+        language=payload.language,
+        complexity_target=payload.complexity_target,
+        current_code=payload.current_code,
+        transcript=payload.transcript,
+        conversation=payload.conversation,
+        event_log=payload.event_log,
+    )
+    return CodingEvaluationResponse.model_validate(parsed)
 
 @app.get("/health", response_class=fastapi.responses.PlainTextResponse)
 async def health_check():
     """Health check endpoint."""
     return "Healthy"
-
-

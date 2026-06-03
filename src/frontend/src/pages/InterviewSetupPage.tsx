@@ -6,6 +6,9 @@ import './InterviewFlow.css'
 
 type InputMode = 'text' | 'file'
 type InterviewLength = 'short' | 'medium' | 'long'
+type CodingDifficulty = 'easy' | 'medium' | 'hard'
+type InterviewerMode = 'warm' | 'neutral' | 'bar_raiser' | 'silent'
+type PreferredLanguage = 'typescript' | 'javascript' | 'python' | 'java' | 'csharp'
 
 interface ParsedSourceState {
   mode: InputMode
@@ -109,6 +112,10 @@ export default function InterviewSetupPage() {
     isParsing: false,
   })
   const [interviewLength, setInterviewLength] = useState<InterviewLength>('medium')
+  const [targetCompany, setTargetCompany] = useState('')
+  const [codingDifficulty, setCodingDifficulty] = useState<CodingDifficulty>('medium')
+  const [interviewerMode, setInterviewerMode] = useState<InterviewerMode>('neutral')
+  const [preferredLanguage, setPreferredLanguage] = useState<PreferredLanguage>('typescript')
   const [error, setError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
 
@@ -155,6 +162,10 @@ export default function InterviewSetupPage() {
         resume_text: resumeText,
         job_description_text: jobDescriptionText,
         interview_length: interviewLength,
+        target_company: targetCompany.trim() || undefined,
+        coding_difficulty: codingDifficulty,
+        interviewer_mode: interviewerMode,
+        preferred_language: preferredLanguage,
       })
       navigate(`/interviews/${session.id}/run`)
     } catch (err) {
@@ -170,7 +181,7 @@ export default function InterviewSetupPage() {
         <p className="section-eyebrow">Interview Setup</p>
         <h1>Configure the interview parameters.</h1>
         <p className="support-copy mt-2">
-          Load your candidate context, select the interview length, and start the interview flow
+          Load the candidate context, choose the interview format, and include the live coding round.
         </p>
       </article>
 
@@ -213,6 +224,88 @@ export default function InterviewSetupPage() {
             >
               <strong style={{ color: "white" }}>{option.title}</strong>
               <span>{option.description}</span>
+            </button>
+          ))}
+        </div>
+      </article>
+
+      <article className="flow-card">
+        <div className="section-head">
+          <div>
+            <p className="section-eyebrow">Coding Round</p>
+            <h2>Configure the live coding stage</h2>
+          </div>
+        </div>
+
+        <div className="setup-grid coding-config-grid">
+          <div>
+            <label htmlFor="company-input" className="field-label">
+              Target company
+            </label>
+            <input
+              id="company-input"
+              className="text-input"
+              value={targetCompany}
+              onChange={(event) => setTargetCompany(event.target.value)}
+              placeholder="Google, Meta, Amazon..."
+            />
+            <p className="support-copy mt-2">
+              If the company is missing, the system will pick the closest problem style from the bank.
+            </p>
+          </div>
+
+          <div>
+            <label htmlFor="language-select" className="field-label">
+              Preferred language
+            </label>
+            <select
+              id="language-select"
+              className="text-input"
+              value={preferredLanguage}
+              onChange={(event) => setPreferredLanguage(event.target.value as PreferredLanguage)}
+            >
+              <option value="typescript">TypeScript</option>
+              <option value="javascript">JavaScript</option>
+              <option value="python">Python</option>
+              <option value="java">Java</option>
+              <option value="csharp">C#</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="length-grid mt-2">
+          {(['easy', 'medium', 'hard'] as CodingDifficulty[]).map((option) => (
+            <button
+              key={option}
+              type="button"
+              className={codingDifficulty === option ? 'length-option active' : 'length-option'}
+              onClick={() => setCodingDifficulty(option)}
+            >
+              <strong style={{ color: 'white' }}>{option}</strong>
+              <span>
+                {option === 'hard'
+                  ? 'Plain editor, no syntax highlighting'
+                  : 'Monaco editor with full coding support'}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <div className="length-grid mt-2">
+          {(['warm', 'neutral', 'bar_raiser', 'silent'] as InterviewerMode[]).map((option) => (
+            <button
+              key={option}
+              type="button"
+              className={interviewerMode === option ? 'length-option active' : 'length-option'}
+              onClick={() => setInterviewerMode(option)}
+            >
+              <strong style={{ color: 'white' }}>{option.replace('_', ' ')}</strong>
+              <span>
+                {option === 'warm' && 'Short prompts, a little more supportive'}
+                {option === 'neutral' && 'Balanced FAANG-style interviewer'}
+                {option === 'bar_raiser' && 'Sharper follow-ups and stricter standards'}
+                {option === 'silent' && 'Intervenes rarely, only on strong signals'}
+              </span>
             </button>
           ))}
         </div>

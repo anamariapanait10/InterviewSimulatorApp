@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import CodingInterviewStage from '../components/CodingInterviewStage'
 import {
-  finishInterview,
   getInterview,
   getInterviewHint,
   getInterviewModelAnswer,
+  skipInterviewQuestion,
   submitInterviewAnswer,
 } from '../api'
 import type { InterviewSession } from '../types'
@@ -39,9 +40,6 @@ export default function InterviewRunPage() {
         setSession(nextSession)
         setHint(null)
         setModelAnswer(null)
-        if (nextSession.is_completed) {
-          navigate(`/interviews/${nextSession.id}/summary`, { replace: true })
-        }
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Unable to load interview')
@@ -58,7 +56,13 @@ export default function InterviewRunPage() {
     return () => {
       cancelled = true
     }
-  }, [navigate, sessionId])
+  }, [sessionId])
+
+  useEffect(() => {
+    if (session?.is_completed) {
+      navigate(`/interviews/${session.id}/summary`, { replace: true })
+    }
+  }, [navigate, session])
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -76,16 +80,7 @@ export default function InterviewRunPage() {
     setIsSubmitting(true)
 
     try {
-      const isLastQuestion = session.current_question_index === session.questions.length - 1
-      const updated = isLastQuestion
-        ? await finishInterview(session.id, trimmedAnswer)
-        : await submitInterviewAnswer(session.id, trimmedAnswer)
-
-      if (isLastQuestion) {
-        navigate(`/interviews/${updated.id}/summary`)
-        return
-      }
-
+      const updated = await submitInterviewAnswer(session.id, trimmedAnswer)
       setSession(updated)
       setAnswer('')
       setHint(null)
@@ -131,6 +126,26 @@ export default function InterviewRunPage() {
     }
   }
 
+  const skipQuestion = async () => {
+    if (!session) {
+      return
+    }
+
+    setError(null)
+    setIsSubmitting(true)
+    try {
+      const updated = await skipInterviewQuestion(session.id)
+      setSession(updated)
+      setAnswer('')
+      setHint(null)
+      setModelAnswer(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to skip this question')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
   if (isLoading) {
     return (
       <section className="flow-card">
@@ -150,11 +165,12 @@ export default function InterviewRunPage() {
     )
   }
 
-  const currentQuestion = session.questions[session.current_question_index]
+  const questionStageComplete = session.current_question_index >= session.questions.length
+  const currentQuestion = questionStageComplete ? null : session.questions[session.current_question_index]
   const answeredCount = session.answers.length
-  const totalQuestions = session.questions.length
-  const isLastQuestion = session.current_question_index === totalQuestions - 1
-  const progressValue = totalQuestions === 0 ? 0 : (answeredCount / totalQuestions) * 100
+  const stageCount = session.questions.length + (session.coding_round ? 1 : 0)
+  const completedStageCount = answeredCount + (session.is_completed && session.coding_round ? 1 : 0)
+  const progressValue = stageCount === 0 ? 0 : (completedStageCount / stageCount) * 100
 
   return (
     <section className="runner-layout">
@@ -168,93 +184,102 @@ export default function InterviewRunPage() {
         </div>
 
         <div className="progress-copy">
-          <span>{answeredCount} answered</span>
-          <span>{totalQuestions - answeredCount} remaining</span>
+          <span>{answeredCount} question answers saved</span>
+          <span>{Math.max(0, stageCount - completedStageCount)} steps remaining</span>
         </div>
         <div className="progress-track" aria-hidden="true">
           <div className="progress-fill" style={{ width: `${progressValue}%` }} />
         </div>
       </article>
 
-      <article className="flow-card question-stage">
-        <div className="question-stage-head">
-          <span className={`tag ${currentQuestion.category}`}>{currentQuestion.category}</span>
-          <strong>
-            Question {session.current_question_index + 1} of {totalQuestions}
-          </strong>
-        </div>
-        <h2>{currentQuestion.prompt}</h2>
-        <p className="support-copy">
-          Write your response in full sentences. The next step stores this answer and advances the
-          interview.
-        </p>
+      {!questionStageComplete && currentQuestion ? (
+        <article className="flow-card question-stage">
+          <div className="question-stage-head">
+            <span className={`tag ${currentQuestion.category}`}>{currentQuestion.category}</span>
+            <strong>
+              Question {session.current_question_index + 1} of {session.questions.length}
+            </strong>
+          </div>
+          <h2>{currentQuestion.prompt}</h2>
+          <p className="support-copy">
+            Answer this part first. The coding round starts after the question stage is complete.
+          </p>
 
-        <div className="helper-actions">
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={isSubmitting || isLoadingHint || isLoadingModelAnswer}
-            onClick={() => void loadHint()}
-          >
-            {isLoadingHint ? 'Loading hint...' : 'Give Me a Hint'}
-          </button>
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={isSubmitting || isLoadingHint || isLoadingModelAnswer}
-            onClick={() => void loadModelAnswer()}
-          >
-            {isLoadingModelAnswer ? 'Loading answer...' : "I Don't Know the Answer"}
-          </button>
-        </div>
-
-        {hint && (
-          <article className="helper-card">
-            <p className="section-eyebrow">Hint</p>
-            <p>{hint}</p>
-          </article>
-        )}
-
-        {modelAnswer && (
-          <article className="helper-card">
-            <p className="section-eyebrow">Suggested Answer</p>
-            <p>{modelAnswer}</p>
-          </article>
-        )}
-
-        <form className="answer-form" onSubmit={submit}>
-          <label htmlFor="answer-input" className="field-label">
-            Your answer
-          </label>
-          <textarea
-            id="answer-input"
-            className="large-textarea"
-            rows={10}
-            value={answer}
-            onChange={(event) => setAnswer(event.target.value)}
-            placeholder="Write your answer here..."
-            disabled={isSubmitting}
-          />
-
-          {error && (
-            <p className="status-banner error" role="alert">
-              {error}
-            </p>
-          )}
-
-          <div className="footer-actions">
-            <button type="submit" className="primary-button" disabled={isSubmitting}>
-              {isSubmitting
-                ? isLastQuestion
-                  ? 'Finishing interview...'
-                  : 'Saving answer...'
-                : isLastQuestion
-                  ? 'Finish Interview'
-                  : 'Next Question'}
+          <div className="helper-actions">
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={isSubmitting || isLoadingHint || isLoadingModelAnswer}
+              onClick={() => void loadHint()}
+            >
+              {isLoadingHint ? 'Loading hint...' : 'Give Me a Hint'}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={isSubmitting || isLoadingHint || isLoadingModelAnswer}
+              onClick={() => void loadModelAnswer()}
+            >
+              {isLoadingModelAnswer ? 'Loading answer...' : "I Don't Know the Answer"}
             </button>
           </div>
-        </form>
-      </article>
+
+          {hint && (
+            <article className="helper-card">
+              <p className="section-eyebrow">Hint</p>
+              <p>{hint}</p>
+            </article>
+          )}
+
+          {modelAnswer && (
+            <article className="helper-card">
+              <p className="section-eyebrow">Suggested Answer</p>
+              <p>{modelAnswer}</p>
+            </article>
+          )}
+
+          <form className="answer-form" onSubmit={submit}>
+            <label htmlFor="answer-input" className="field-label">
+              Your answer
+            </label>
+            <textarea
+              id="answer-input"
+              className="large-textarea"
+              rows={10}
+              value={answer}
+              onChange={(event) => setAnswer(event.target.value)}
+              placeholder="Write your answer here..."
+              disabled={isSubmitting}
+            />
+
+            {error && (
+              <p className="status-banner error" role="alert">
+                {error}
+              </p>
+            )}
+
+            <div className="footer-actions">
+              <button type="submit" className="primary-button" disabled={isSubmitting}>
+                {isSubmitting
+                  ? 'Saving answer...'
+                  : session.current_question_index === session.questions.length - 1
+                    ? 'Start Coding Round'
+                    : 'Next Question'}
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={isSubmitting}
+                onClick={() => void skipQuestion()}
+              >
+                {isSubmitting ? 'Working...' : 'Skip Question'}
+              </button>
+            </div>
+          </form>
+        </article>
+      ) : (
+        <CodingInterviewStage session={session} onSessionChange={setSession} />
+      )}
     </section>
   )
 }

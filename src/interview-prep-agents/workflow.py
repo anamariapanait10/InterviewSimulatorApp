@@ -1,508 +1,400 @@
-import os
-import importlib
-import uuid
-import asyncio
+import json
 import logging
-import time
-import sys
-from typing import Any, cast
+import os
+from typing import Any
 
-import httpx
-from agents.mcp import MCPServerStreamableHttp
-from agents import Runner, Agent
-from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
-from upload_urls import rewrite_attachment_urls_for_agent
-logger = logging.getLogger("interview-prep-agents.workflow")
+from agents import Agent, Runner
+
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-BACKEND_BASE_URL = (
-    os.getenv("BACKEND_URL")
-    or os.getenv("BACKEND_HTTP")
-    or ""
-).rstrip("/")
-BACKEND_INTERVIEW_DATA_API_PREFIX = "/api/interview-data"
+logger = logging.getLogger("interview-prep-agents.workflow")
 
-INTERVIEW_DATA_MCP_URL = os.getenv("INTERVIEW_DATA_HTTP") or "http://127.0.0.1:8002"
-INTERVIEW_DATA_MCP_URL = INTERVIEW_DATA_MCP_URL + "/interview-data"
-print(f"Interview Data MCP URL: {INTERVIEW_DATA_MCP_URL}", file=sys.stderr)
-
-MARKITDOWN_BASE_URL = (
-    os.getenv("MCP_MARKITDOWN_HTTP")
-    or os.getenv("MARKITDOWN_MCP_URL")
-    or "http://127.0.0.1:3001"
-).rstrip("/")
-
-_orchestrator_agent: Any | None = None
-_session_locks: dict[str, asyncio.Lock] = {}
-_session_locks_guard = asyncio.Lock()
-_mcp_servers: list[Any] = []
-_mcp_lock = asyncio.Lock()
-_mcp_initialized = False
+_structured_agents: dict[str, Agent] = {}
 
 
-async def _post_json_with_diagnostics(
-    *,
-    operation: str,
-    url: str,
-    payload: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    trace_id = uuid.uuid4().hex[:12]
-    timeout = httpx.Timeout(connect=3.0, read=40.0, write=20.0, pool=5.0)
-    started_at = time.perf_counter()
+def _strip_json_fence(text: str) -> str:
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        candidate = candidate.split("\n", 1)[1] if "\n" in candidate else candidate
+        if candidate.endswith("```"):
+            candidate = candidate[:-3]
+    return candidate.strip()
 
-    logger.info("backend request start trace=%s op=%s url=%s", trace_id, operation, url)
+
+def _get_structured_agent(name: str, instructions: str) -> Agent:
+    cached = _structured_agents.get(name)
+    if cached is not None:
+        return cached
+
+    agent = Agent(
+        name=name,
+        instructions=instructions,
+        model=OPENAI_MODEL,
+    )
+    _structured_agents[name] = agent
+    return agent
+
+
+async def _run_agent_text(*, name: str, instructions: str, prompt: str) -> str:
+    agent = _get_structured_agent(name, instructions)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(url, json=payload)
-            response.raise_for_status()
-            elapsed_ms = (time.perf_counter() - started_at) * 1000
-            logger.info(
-                "backend request ok trace=%s op=%s status=%s elapsed_ms=%.2f",
-                trace_id,
-                operation,
-                response.status_code,
-                elapsed_ms,
-            )
-            data = response.json()
-            if not isinstance(data, dict):
-                raise RuntimeError(f"Backend returned non-object JSON for op={operation}")
-            return data
-    except httpx.TimeoutException as exc:
-        elapsed_ms = (time.perf_counter() - started_at) * 1000
-        logger.error(
-            "backend request timeout trace=%s op=%s url=%s elapsed_ms=%.2f",
-            trace_id,
-            operation,
-            url,
-            elapsed_ms,
-        )
-        raise RuntimeError(
-            f"Backend timeout during {operation} ({url}) after {elapsed_ms:.2f} ms"
-        ) from exc
-    except httpx.HTTPStatusError as exc:
-        elapsed_ms = (time.perf_counter() - started_at) * 1000
-        detail = exc.response.text or ""
-        logger.error(
-            "backend request status error trace=%s op=%s url=%s status=%s elapsed_ms=%.2f detail=%s",
-            trace_id,
-            operation,
-            url,
-            exc.response.status_code,
-            elapsed_ms,
-            detail,
-        )
-        raise RuntimeError(
-            f"Backend status error during {operation}: {exc.response.status_code}"
-        ) from exc
-    except httpx.HTTPError as exc:
-        elapsed_ms = (time.perf_counter() - started_at) * 1000
-        logger.error(
-            "backend request transport error trace=%s op=%s url=%s elapsed_ms=%.2f error=%s",
-            trace_id,
-            operation,
-            url,
-            elapsed_ms,
-            str(exc),
-        )
-        raise RuntimeError(
-            f"Backend transport error during {operation} ({url}): {exc}"
-        ) from exc
+        result = await Runner.run(agent, input=prompt)
+    except Exception:
+        logger.exception("agent run failed name=%s", name)
+        raise
+
+    final_output = getattr(result, "final_output", "")
+    if isinstance(final_output, str):
+        return final_output.strip()
+    if final_output is None:
+        return ""
+    return str(final_output).strip()
 
 
-def _build_orchestrator_agent() -> Any:
-    global _orchestrator_agent
-    if _orchestrator_agent is not None:
-        return _orchestrator_agent
+async def _run_agent_json(*, name: str, instructions: str, prompt: str) -> dict[str, Any]:
+    text = await _run_agent_text(name=name, instructions=instructions, prompt=prompt)
+    parsed = json.loads(_strip_json_fence(text))
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"Agent {name} did not return a JSON object")
+    return parsed
 
-    behavioral_agent = Agent(
-        name="behavioral",
-        instructions=prompt_with_handoff_instructions(
-            "You are a behavioral interviewer. "
-            "Ask four STAR-method questions tailored to the candidate's background. "
-            "Use InterviewData tools to read session context and store answers. "
-            "Ask one question at a time. "
-            "When the behavioral portion is done, immediately call the handoff tool to transfer to the technical interviewer. "
-            "Do not end by wishing the user luck or saying that there is a next phase without transferring. "
-            "If the user asks for setup help or changes topic unexpectedly, call the handoff tool to transfer back to the orchestrator."
-        ),
-        model=OPENAI_MODEL,
-        mcp_servers=_mcp_servers,
-    )
 
-    technical_agent = Agent(
-        name="technical",
-        instructions=prompt_with_handoff_instructions(
-            "You are a technical interviewer. "
-            "Ask four role-specific technical questions based on the stored resume and job description. "
-            "Use InterviewData tools to read session state and save the candidate's answers. "
-            "Ask one question at a time. "
-            "When the technical round is complete, immediately call the handoff tool to transfer to the summarizer. "
-            "Do not end by telling the user there is a next phase without transferring. "
-            "If the conversation goes off-path, call the handoff tool to transfer back to the orchestrator."
-        ),
-        model=OPENAI_MODEL,
-        mcp_servers=_mcp_servers,
-    )
-    
-    summarizer = Agent(
-        name="summarizer",
+async def build_interview_plan_with_agent(
+    *,
+    resume_text: str,
+    job_description_text: str,
+    interview_length: str,
+    behavioral_count: int,
+    technical_count: int,
+) -> dict[str, Any]:
+    prompt = f"""
+Create a complete interview plan as strict JSON.
+
+Interview length: {interview_length}
+Behavioral questions required: {behavioral_count}
+Technical questions required: {technical_count}
+
+Resume:
+{resume_text}
+
+Job description:
+{job_description_text}
+
+Return JSON with this exact shape:
+{{
+  "role_title": "short role title",
+  "questions": [
+    {{"id": "behavioral-1", "category": "behavioral", "prompt": "..."}} ,
+    {{"id": "technical-1", "category": "technical", "prompt": "..."}}
+  ]
+}}
+
+Rules:
+- Return exactly {behavioral_count + technical_count} questions.
+- The first {behavioral_count} must be behavioral.
+- The remaining {technical_count} must be technical.
+- Each question must be tailored to the candidate and role.
+- Do not wrap the JSON in markdown fences.
+""".strip()
+
+    return await _run_agent_json(
+        name="interview_planner_agent",
         instructions=(
-            "You are the interview summarizer. "
-            "Use InterviewData tools to review the full session and generate a final assessment. "
-            "Summarize strengths, weaknesses, behavioral performance, technical performance, "
-            "and 3-5 concrete improvement suggestions. "
-            "After delivering the summary, explain that the interview is complete and greet the user."
+            "You are an interview planner agent. "
+            "Design realistic, role-specific interview plans. "
+            "Return only valid JSON that exactly matches the requested schema."
         ),
-        mcp_servers=_mcp_servers,
-    )
-
-    _orchestrator_agent = Agent(
-        name="orchestrator",
-        instructions=prompt_with_handoff_instructions(
-            """
-            You are the Interview Orchestrator for an AI Interview Coach system.
-
-            Your job is to:
-            1. Review the FULL conversation history
-            2. Determine which interview phases are already complete
-            3. Fetch the interview session from the interview data MCP server
-            4. Collect and store the user's resume and job description. If the user hasn't provided them, ask the user for their resume and job description (link or text).
-            5. The user may proceed without a resume or without a job description if they choose.
-            6. Use MarkItDown to parse document links into markdown.
-            7. Store the resume and job description in the session record using the interview data MCP server.
-            8. Hand off to the correct specialist agent at the right time
-
-            You do NOT conduct behavioural or technical interviews yourself.
-            You do NOT generate the final summary yourself.
-            Your role is orchestration, intake, and routing.
-
-            Interview phase sequence:
-            1. Reception / session setup / document intake
-            2. Behavioural Interviewer
-            3. Technical Interviewer
-            4. Summariser
-
-            IMPORTANT:
-            - Always review the FULL conversation history before deciding what to do.
-            - Do NOT route to an agent whose phase has already been completed.
-            - When a specialist hands back, treat that phase as COMPLETE and advance to the next one.
-            - If the user explicitly requests a specific phase, honour that request.
-            - If the user wants to end, hand off to the summarizer.
-            - If the user's request is unexpected or unclear, briefly ask what they'd like to do.
-            - When routing is clear, call the handoff tool immediately instead of only describing the next step.
-
-            Routing rules (apply in order, skipping completed phases):
-            - If session setup or document intake has NOT been completed
-                → handle it yourself first
-            - If intake is complete and behavioural interview has NOT started
-                → hand off to "behavioural_interviewer"
-            - If behavioural interview is complete and technical interview has NOT started
-                → hand off to "technical_interviewer"
-            - If technical interview is complete
-                → hand off to "summariser"
-            - If the user wants to end early
-                → hand off to "summariser"
-            - If the user explicitly requests a specific phase
-                → honour that request
-
-            Tone:
-            - Be brief
-            - Be supportive
-            - Be encouraging
-            - Let specialist agents do the detailed interview work
-
-            Only perform detailed intake/session setup yourself.
-            All interview questioning and summarisation should be handled by the specialist agents.
-        """
-        ),
-        model=OPENAI_MODEL,
-        mcp_servers=_mcp_servers,
-        handoffs=[behavioral_agent, technical_agent, summarizer],
-    )
-
-    behavioral_agent.handoffs = [technical_agent, _orchestrator_agent]
-    technical_agent.handoffs = [summarizer, _orchestrator_agent]
-
-    return _orchestrator_agent
-
-
-def _normalize_history(history: list[dict[str, Any]]) -> list[dict[str, str]]:
-    normalized: list[dict[str, str]] = []
-    for item in history:
-        role = str(item.get("role", "")).strip().lower()
-        content = item.get("content")
-        if role not in {"system", "user", "assistant"}:
-            continue
-        if not isinstance(content, str) or not content.strip():
-            continue
-        normalized.append({"role": role, "content": rewrite_attachment_urls_for_agent(content)})
-    return normalized
-
-
-def _extract_attachment_links(message: str) -> tuple[str | None, str | None]:
-    text = message.lower()
-    resume_link: str | None = None
-    job_description_link: str | None = None
-
-    for line in message.splitlines():
-        stripped = line.strip()
-        if not stripped.lower().startswith("attachment url:"):
-            continue
-        value = stripped.split(":", 1)[1].strip()
-        if not value:
-            continue
-
-        if "resume" in text and resume_link is None:
-            resume_link = value
-        elif any(key in text for key in ("job", "jd", "description")) and job_description_link is None:
-            job_description_link = value
-        elif resume_link is None:
-            resume_link = value
-        elif job_description_link is None:
-            job_description_link = value
-
-    return resume_link, job_description_link
-
-
-def _extract_message_body(message: str) -> str:
-    body_lines: list[str] = []
-    for line in message.splitlines():
-        if line.strip().lower().startswith("attachment url:"):
-            continue
-        body_lines.append(line)
-    return "\n".join(body_lines).strip()
-
-
-def _to_mcp_endpoint(base_url: str) -> str:
-    return base_url if base_url.endswith("/mcp") else f"{base_url}/mcp"
-
-
-async def initialize_mcp_servers() -> None:
-    global _mcp_initialized
-    if _mcp_initialized:
-        return
-
-    async with _mcp_lock:
-        if _mcp_initialized:
-            return
-
-        servers: list[Any] = [
-            MCPServerStreamableHttp(
-                params={"url": _to_mcp_endpoint(MARKITDOWN_BASE_URL)},
-                cache_tools_list=True,
-                name="markitdown",
-                client_session_timeout_seconds=30,
-            ),
-            MCPServerStreamableHttp(
-                params={"url": _to_mcp_endpoint(INTERVIEW_DATA_MCP_URL)},
-                cache_tools_list=True,
-                name="interview_data",
-                client_session_timeout_seconds=30,
-            ),
-        ]
-
-        for server in servers:
-            await server.connect()
-
-        _mcp_servers.clear()
-        _mcp_servers.extend(servers)
-        _mcp_initialized = True
-        logger.info(
-            "MCP servers initialized markitdown=%s",
-            _to_mcp_endpoint(MARKITDOWN_BASE_URL),
-        )
-
-
-async def cleanup_mcp_servers() -> None:
-    global _mcp_initialized
-    async with _mcp_lock:
-        for server in _mcp_servers:
-            try:
-                await server.cleanup()
-            except Exception:
-                logger.exception("MCP cleanup failed")
-        _mcp_servers.clear()
-        _mcp_initialized = False
-
-
-async def _ensure_and_load_session(session_id: str) -> dict[str, Any]:
-    session_uuid = str(uuid.UUID(session_id))
-    url = f"{BACKEND_BASE_URL}{BACKEND_INTERVIEW_DATA_API_PREFIX}/sessions/{session_uuid}"
-    return await _post_json_with_diagnostics(
-        operation="ensure_and_load_session",
-        url=url,
+        prompt=prompt,
     )
 
 
-def _build_context_system_message(session: dict[str, Any]) -> dict[str, str]:
-    resume_link = session.get("resume_link") or "none"
-    job_link = session.get("job_description_link") or "none"
-    resume_text = (session.get("resume_text") or "").strip()
-    job_text = (session.get("job_description_text") or "").strip()
-    transcript = session.get("transcript") or ""
-    transcript_tail = transcript[-1600:] if transcript else ""
-    resume_text_tail = resume_text[-1200:] if resume_text else ""
-    job_text_tail = job_text[-1600:] if job_text else ""
-
-    return {
-        "role": "system",
-        "content": (
-            "Interview session context from persistence layer. "
-            f"resume_link={resume_link}; job_description_link={job_link}. "
-            f"resume_text_present={'yes' if resume_text else 'no'}; "
-            f"job_description_text_present={'yes' if job_text else 'no'}. "
-            "If these fields are present, treat them as already stored and do not ask the user to re-send them. "
-            f"Resume text excerpt:\n{resume_text_tail}\n\n"
-            f"Job description excerpt:\n{job_text_tail}\n\n"
-            "Use this context to keep continuity across turns. "
-            f"Transcript tail:\n{transcript_tail}"
-        ),
-    }
-
-
-async def _update_session_fields(
+async def build_interview_report_with_agent(
     *,
-    session: dict[str, Any],
-    resume_link: str | None = None,
-    job_description_link: str | None = None,
-    resume_text: str | None = None,
-    job_description_text: str | None = None,
+    role_title: str,
+    interview_length: str,
+    resume_text: str,
+    job_description_text: str,
+    questions: list[dict[str, Any]],
+    answers: list[dict[str, Any]],
+    coding_feedback_input: str | None = None,
+    coding_hire_recommendation: str | None = None,
 ) -> dict[str, Any]:
-    session_uuid = str(uuid.UUID(str(session["id"])))
-    payload = {
-        "record": {
-            "id": session_uuid,
-            "resume_link": resume_link if resume_link is not None else session.get("resume_link"),
-            "resume_text": resume_text if resume_text is not None else session.get("resume_text"),
-            "proceed_without_resume": bool(session.get("proceed_without_resume")),
-            "job_description_link": (
-                job_description_link
-                if job_description_link is not None
-                else session.get("job_description_link")
-            ),
-            "job_description_text": (
-                job_description_text
-                if job_description_text is not None
-                else session.get("job_description_text")
-            ),
-            "proceed_without_job_description": bool(session.get("proceed_without_job_description")),
-            "transcript": None,
-            "is_completed": bool(session.get("is_completed")),
-        }
-    }
-    url = f"{BACKEND_BASE_URL}{BACKEND_INTERVIEW_DATA_API_PREFIX}/update_interview_session"
-    return await _post_json_with_diagnostics(
-        operation="update_session_fields",
-        url=url,
-        payload=payload,
+    coding_block = ""
+    if coding_feedback_input:
+        coding_block = (
+            "\nCoding round context:\n"
+            f"- Coding evaluation summary: {coding_feedback_input}\n"
+            f"- Coding hire signal: {coding_hire_recommendation or 'not provided'}\n"
+        )
+
+    prompt = f"""
+Evaluate the completed interview and return strict JSON only.
+
+Role title: {role_title}
+Interview length: {interview_length}
+
+Resume:
+{resume_text}
+
+Job description:
+{job_description_text}
+
+Questions:
+{json.dumps(questions, ensure_ascii=True, indent=2)}
+
+Answers:
+{json.dumps(answers, ensure_ascii=True, indent=2)}
+{coding_block}
+
+Return JSON with this exact shape:
+{{
+  "score": <integer 1-100>,
+  "summary": "2-3 sentence summary",
+  "strengths": ["...", "...", "..."],
+  "improvements": ["...", "...", "..."],
+  "behavioral_feedback": "...",
+  "technical_feedback": "...",
+  "communication_feedback": "...",
+  "recommendation": "...",
+  "question_feedback": [
+    {{"question_id": "behavioral-1", "score": 8, "feedback": "..."}}
+  ],
+  "coding_feedback": "...",
+  "hire_recommendation": "strong_hire|hire|lean_hire|lean_no_hire|no_hire"
+}}
+
+Rules:
+- Score must be an integer from 1 to 100.
+- Include one question_feedback item per answer.
+- Keep strengths and improvements concrete and actionable.
+- If coding context is present, include it in the final recommendation and coding_feedback.
+- Do not wrap the JSON in markdown fences.
+""".strip()
+
+    return await _run_agent_json(
+        name="interview_report_agent",
+        instructions=(
+            "You are an interview report agent. "
+            "Synthesize behavioral, technical, communication, and coding evidence into a pragmatic assessment. "
+            "Return only strict JSON matching the requested schema."
+        ),
+        prompt=prompt,
     )
 
 
-async def _append_turn(
+async def build_interview_help_with_agent(
     *,
-    session_id: str,
-    user_message: str,
-    assistant_message: str,
-    resume_link: str | None,
-    job_description_link: str | None,
-    resume_text: str | None = None,
-    job_description_text: str | None = None,
-) -> None:
-    session_uuid = str(uuid.UUID(session_id))
-    payload = {
-        "user_message": user_message,
-        "assistant_message": assistant_message,
-        "resume_link": resume_link,
-        "job_description_link": job_description_link,
-        "resume_text": resume_text,
-        "job_description_text": job_description_text,
-    }
-    url = f"{BACKEND_BASE_URL}{BACKEND_INTERVIEW_DATA_API_PREFIX}/sessions/{session_uuid}/turn"
-    await _post_json_with_diagnostics(
-        operation="append_turn",
-        url=url,
-        payload=payload,
+    help_kind: str,
+    role_title: str,
+    question: dict[str, Any],
+    resume_text: str,
+    job_description_text: str,
+) -> dict[str, Any]:
+    intent_line = (
+        "Provide a short hint that points the user in the right direction without giving the full answer."
+        if help_kind == "hint"
+        else "Provide a strong sample answer the user could study as the correct answer."
+    )
+
+    prompt = f"""
+You are helping a user answer an interview question.
+
+Role title: {role_title}
+Question category: {question.get("category", "")}
+Question:
+{question.get("prompt", "")}
+
+Resume:
+{resume_text}
+
+Job description:
+{job_description_text}
+
+Task:
+{intent_line}
+
+Return strict JSON with this exact shape:
+{{
+  "content": "..."
+}}
+
+Rules:
+- For `hint`, keep it under 80 words and do not reveal the full answer.
+- For `model_answer`, keep it practical, polished, and specific.
+- Do not wrap the JSON in markdown fences.
+""".strip()
+
+    return await _run_agent_json(
+        name="interview_help_agent",
+        instructions=(
+            "You are an interview help agent. "
+            "Support the candidate without drifting off-topic. "
+            "Return only strict JSON matching the requested schema."
+        ),
+        prompt=prompt,
     )
 
 
-async def _get_session_lock(session_id: str) -> asyncio.Lock:
-    existing = _session_locks.get(session_id)
-    if existing is not None:
-        return existing
-
-    async with _session_locks_guard:
-        existing = _session_locks.get(session_id)
-        if existing is not None:
-            return existing
-
-        lock = asyncio.Lock()
-        _session_locks[session_id] = lock
-        return lock
-
-
-async def run_text_turn(*, message: str, history: list[dict[str, Any]], session_id: str) -> str:
-    await initialize_mcp_servers()
-    normalized_message = rewrite_attachment_urls_for_agent(message)
-    resume_link, job_description_link = _extract_attachment_links(normalized_message)
-    message_body = _extract_message_body(normalized_message)
-
-    try:
-        agents_sdk = importlib.import_module("agents")
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "OpenAI Agents SDK is not installed. Install dependency 'openai-agents'."
-        ) from exc
-
-    router_agent = _build_orchestrator_agent()
-
-    lock = await _get_session_lock(session_id)
-    async with lock:
-        session = await _ensure_and_load_session(session_id)
-        job_description_text = None
-
-        # When the user uploads a resume and types the JD in the same turn,
-        # persist both before the model runs so the agent can rely on session state.
-        if resume_link and message_body and not session.get("job_description_text"):
-            job_description_text = message_body
-
-        if (
-            (resume_link and resume_link != session.get("resume_link"))
-            or (job_description_link and job_description_link != session.get("job_description_link"))
-            or (job_description_text and job_description_text != session.get("job_description_text"))
-        ):
-            session = await _update_session_fields(
-                session=session,
-                resume_link=resume_link,
-                job_description_link=job_description_link,
-                job_description_text=job_description_text,
-            )
-
-        convo = _normalize_history(history)
-        convo.insert(0, _build_context_system_message(session))
-        convo.append({"role": "user", "content": normalized_message})
-
-        result = await Runner.run(
-            router_agent,
-            input=cast(Any, convo),
-            context={"session_id": session_id},
+async def build_coding_reply_with_agent(
+    *,
+    interviewer_prompt: str,
+    problem_title: str,
+    problem_prompt: str,
+    problem_constraints: list[str],
+    problem_examples: list[dict[str, Any]],
+    edge_case_hints: list[str],
+    complexity_target: str | None,
+    interviewer_mode: str,
+    recent_event_types: list[str],
+    transcript_recent: str,
+    current_code: str,
+    conversation: list[dict[str, Any]],
+    forced_followup: str | None = None,
+) -> dict[str, Any]:
+    conversation_block = "\n".join(
+        f"{str(turn.get('role', 'unknown')).title()}: {str(turn.get('content', '')).strip()}"
+        for turn in conversation[-8:]
+        if str(turn.get("content", "")).strip()
+    ) or "No prior coding dialogue yet."
+    constraints_block = "\n".join(f"- {constraint}" for constraint in problem_constraints[:6]) or "- No explicit constraints provided."
+    examples_block = "\n".join(
+        f"- Input: {str(example.get('input', '')).strip()} | Output: {str(example.get('output', '')).strip()}"
+        + (
+            f" | Explanation: {str(example.get('explanation', '')).strip()}"
+            if str(example.get("explanation", "")).strip()
+            else ""
         )
+        for example in problem_examples[:3]
+    ) or "- No examples provided."
+    edge_cases_block = "\n".join(f"- {hint}" for hint in edge_case_hints[:6]) or "- Use only edge cases implied by the prompt and constraints."
 
-        final_output = getattr(result, "final_output", "")
-        if isinstance(final_output, str):
-            final_text = final_output
-        elif final_output is None:
-            final_text = ""
-        else:
-            final_text = str(final_output)
+    prompt = f"""
+Continue a live coding interview as strict JSON only.
 
-        await _append_turn(
-            session_id=session_id,
-            user_message=normalized_message,
-            assistant_message=final_text,
-            resume_link=resume_link,
-            job_description_link=job_description_link,
-            resume_text=None,
-            job_description_text=job_description_text,
-        )
+Interviewer mode: {interviewer_mode}
+Problem title: {problem_title}
+Problem prompt:
+{problem_prompt}
+Problem constraints:
+{constraints_block}
 
-        return final_text
+Representative examples:
+{examples_block}
+
+Target complexity:
+{complexity_target or "Not explicitly specified"}
+
+Valid edge-case directions:
+{edge_cases_block}
+
+Recent event types: {", ".join(recent_event_types) or "none"}
+Candidate just said:
+{transcript_recent}
+
+Current code excerpt:
+{current_code[-1600:]}
+
+Recent conversation:
+{conversation_block}
+
+Forced follow-up if needed:
+{forced_followup or "none"}
+
+Return JSON with this exact shape:
+{{
+  "reply": "short interviewer reply"
+}}
+
+Rules:
+- Follow this system guidance closely: {interviewer_prompt or 'Be a concise FAANG-style interviewer.'}
+- Reply as the interviewer, not as a coach.
+- Keep it short: one or two sentences.
+- If the candidate asked for clarification, answer that request directly first using constraints/examples-level clarification.
+- Do not reveal the full algorithm or write code for them.
+- Do not ask about impossible scenarios that contradict the stated constraints.
+- When you ask about edge cases, prefer the provided valid edge-case directions over inventing new invalid ones.
+- If a follow-up question helps, ask exactly one pointed question.
+- If the candidate is simply thinking aloud, engage with what they said instead of ignoring it.
+- If the candidate already answered your last question, acknowledge it and move forward instead of repeating yourself.
+- Do not ignore the candidate's most recent utterance.
+- Return only valid JSON and no markdown fences.
+""".strip()
+
+    return await _run_agent_json(
+        name="coding_interviewer_agent",
+        instructions=(
+            "You are a coding interviewer agent for a realistic FAANG-style interview. "
+            "You stay concise, respond to clarifications directly, and never give the full solution. "
+            "Return only strict JSON matching the requested schema."
+        ),
+        prompt=prompt,
+    )
+
+
+async def evaluate_coding_round_with_agent(
+    *,
+    problem_title: str,
+    problem_prompt: str,
+    difficulty: str,
+    language: str,
+    complexity_target: str | None,
+    current_code: str,
+    transcript: str,
+    conversation: list[dict[str, Any]],
+    event_log: list[dict[str, Any]],
+) -> dict[str, Any]:
+    prompt = f"""
+Evaluate a completed coding interview round and return strict JSON only.
+
+Problem title: {problem_title}
+Difficulty: {difficulty}
+Language: {language}
+Problem prompt:
+{problem_prompt}
+Target complexity:
+{complexity_target or "Not specified"}
+
+Transcript:
+{transcript[-5000:]}
+
+Conversation:
+{json.dumps(conversation[-16:], ensure_ascii=True, indent=2)}
+
+Event log:
+{json.dumps(event_log[-30:], ensure_ascii=True, indent=2)}
+
+Current code:
+{current_code[-6000:]}
+
+Return JSON with this exact shape:
+{{
+  "communication": 1,
+  "problem_solving": 1,
+  "coding": 1,
+  "complexity_analysis": 1,
+  "debugging": 1,
+  "edge_cases": 1,
+  "overall_score": 1,
+  "hire_recommendation": "strong_hire|hire|lean_hire|lean_no_hire|no_hire",
+  "summary": "...",
+  "strengths": ["...", "..."],
+  "concerns": ["...", "..."]
+}}
+
+Rules:
+- Category scores must be integers from 1 to 10.
+- overall_score must be an integer from 1 to 100.
+- Base the judgment on the transcript, code, and conversation together.
+- Keep strengths and concerns concrete.
+- Return only valid JSON and no markdown fences.
+""".strip()
+
+    return await _run_agent_json(
+        name="coding_evaluator_agent",
+        instructions=(
+            "You are a coding interview evaluator agent. "
+            "Score communication, problem solving, coding, complexity analysis, debugging, and edge cases fairly and pragmatically. "
+            "Return only strict JSON matching the requested schema."
+        ),
+        prompt=prompt,
+    )

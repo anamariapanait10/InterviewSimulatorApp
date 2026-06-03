@@ -1,7 +1,7 @@
-#:sdk Aspire.AppHost.Sdk@13.2.4
-#:package Aspire.Hosting.JavaScript@13.2.4
-#:package Aspire.Hosting.Python@13.2.4
-#:package Aspire.Hosting.GitHub.Models@13.2.4
+#:sdk Aspire.AppHost.Sdk@13.4.0
+#:package Aspire.Hosting.JavaScript@13.4.0
+#:package Aspire.Hosting.Python@13.4.0
+#:package Aspire.Hosting.GitHub.Models@13.4.0
 #:package CommunityToolkit.Aspire.Hosting.SQLite@13.*
 #:package Microsoft.Extensions.Configuration.Json@10.*
 
@@ -10,6 +10,7 @@ using Microsoft.Extensions.Configuration;
 
 const string RESOURCE_MCP_MARKITDOWN = "mcp-markitdown";
 const string RESOURCE_PROJECT_AGENT = "agent";
+const int FRONTEND_PORT = 5173;
 
 var builder = DistributedApplication.CreateBuilder(args);
 
@@ -60,6 +61,8 @@ var backend = builder.AddUvicornApp("backend", "./src/backend", "main:app")
 agent.WithReference(backend);
 
 var frontend = builder.AddViteApp("frontend", "./src/frontend")
+    .WithExternalHttpEndpoints()
+    .WithHttpEndpoint(port: FRONTEND_PORT, env: "PORT", name: "http")
     .WithReference(backend)
     .WaitFor(backend);
 

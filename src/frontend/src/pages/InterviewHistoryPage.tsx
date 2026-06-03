@@ -97,6 +97,10 @@ export default function InterviewHistoryPage() {
               <h2>{item.interview_length ?? 'custom'} interview</h2>
               <div className="meta-grid compact">
                 <div>
+                  <span>Company</span>
+                  <strong>{item.target_company ?? 'General bank'}</strong>
+                </div>
+                <div>
                   <span>Questions</span>
                   <strong>{item.question_count}</strong>
                 </div>

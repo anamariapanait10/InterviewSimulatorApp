@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from datetime import datetime, timezone
 from typing import Any, Iterable
 from uuid import UUID, uuid4
 
 import aiosqlite
 from pydantic import BaseModel, Field
+
+from coding_problem_bank import DEFAULT_CODING_PROBLEMS
 
 
 def utcnow() -> datetime:
@@ -37,6 +38,91 @@ class InterviewQuestionFeedbackModel(BaseModel):
     feedback: str
 
 
+class CodingProblemExampleModel(BaseModel):
+    input: str
+    output: str
+    explanation: str | None = None
+
+
+class CodingProblemModel(BaseModel):
+    id: str
+    title: str
+    company: str
+    difficulty: str
+    prompt: str
+    constraints: list[str] = Field(default_factory=list)
+    examples: list[CodingProblemExampleModel] = Field(default_factory=list)
+    starter_code: dict[str, str] = Field(default_factory=dict)
+    expected_topics: list[str] = Field(default_factory=list)
+    style_tags: list[str] = Field(default_factory=list)
+    complexity_target: str | None = None
+    edge_case_hints: list[str] = Field(default_factory=list)
+
+
+class CodingInterviewEventModel(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    type: str
+    created_at: datetime = Field(default_factory=utcnow)
+    transcript_excerpt: str | None = None
+    code_excerpt: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CodingInterventionModel(BaseModel):
+    question: str
+    reason: str
+    severity: str
+    created_at: datetime = Field(default_factory=utcnow)
+    prompt_key: str | None = None
+
+
+class CodingConversationTurnModel(BaseModel):
+    role: str
+    content: str
+    created_at: datetime = Field(default_factory=utcnow)
+    kind: str = "message"
+    source_event_type: str | None = None
+    severity: str | None = None
+
+
+class CodingInterviewEvaluationModel(BaseModel):
+    communication: int
+    problem_solving: int
+    coding: int
+    complexity_analysis: int
+    debugging: int
+    edge_cases: int
+    overall_score: int
+    hire_recommendation: str
+    summary: str
+    strengths: list[str] = Field(default_factory=list)
+    concerns: list[str] = Field(default_factory=list)
+
+
+class CodingInterviewRoundModel(BaseModel):
+    enabled: bool = True
+    target_company: str | None = None
+    matched_company: str | None = None
+    selection_strategy: str = "exact_company"
+    interviewer_mode: str = "neutral"
+    difficulty: str = "medium"
+    problem: CodingProblemModel | None = None
+    language: str = "typescript"
+    editor_mode: str = "monaco"
+    current_code: str = ""
+    transcript: str = ""
+    interviewer_prompt: str | None = None
+    event_log: list[CodingInterviewEventModel] = Field(default_factory=list)
+    conversation: list[CodingConversationTurnModel] = Field(default_factory=list)
+    interventions: list[CodingInterventionModel] = Field(default_factory=list)
+    cooldown_seconds: int = 40
+    last_intervention_at: datetime | None = None
+    latest_reason: str | None = None
+    evaluation: CodingInterviewEvaluationModel | None = None
+    started_at: datetime = Field(default_factory=utcnow)
+    completed_at: datetime | None = None
+
+
 class InterviewReportModel(BaseModel):
     summary: str
     strengths: list[str] = Field(default_factory=list)
@@ -46,6 +132,9 @@ class InterviewReportModel(BaseModel):
     communication_feedback: str
     recommendation: str
     question_feedback: list[InterviewQuestionFeedbackModel] = Field(default_factory=list)
+    coding_feedback: str = ""
+    coding_evaluation: CodingInterviewEvaluationModel | None = None
+    hire_recommendation: str = ""
 
 
 class InterviewSessionModel(BaseModel):
@@ -60,9 +149,11 @@ class InterviewSessionModel(BaseModel):
     transcript: str | None = None
     interview_length: str | None = None
     role_title: str | None = None
+    target_company: str | None = None
     questions: list[InterviewQuestionModel] = Field(default_factory=list)
     answers: list[InterviewAnswerModel] = Field(default_factory=list)
     current_question_index: int = 0
+    coding_round: CodingInterviewRoundModel | None = None
     score: int | None = None
     report: InterviewReportModel | None = None
     is_completed: bool = False
@@ -86,9 +177,11 @@ OPTIONAL_COLUMNS: dict[str, str] = {
     "user_id": "TEXT",
     "interview_length": "TEXT",
     "role_title": "TEXT",
+    "target_company": "TEXT",
     "questions_json": "TEXT NOT NULL DEFAULT '[]'",
     "answers_json": "TEXT NOT NULL DEFAULT '[]'",
     "current_question_index": "INTEGER NOT NULL DEFAULT 0",
+    "coding_round_json": "TEXT",
     "score": "INTEGER",
     "report_json": "TEXT",
     "completed_at": "TEXT",
@@ -154,6 +247,12 @@ def _serialize_report(value: InterviewReportModel | None) -> str | None:
     return _json_default(value.model_dump(mode="json"))
 
 
+def _serialize_coding_round(value: CodingInterviewRoundModel | None) -> str | None:
+    if value is None:
+        return None
+    return _json_default(value.model_dump(mode="json"))
+
+
 def _row_to_model(row: aiosqlite.Row) -> InterviewSessionModel:
     created_at = _parse_datetime(row["created_at"]) or utcnow()
     updated_at = _parse_datetime(row["updated_at"]) or utcnow()
@@ -170,9 +269,11 @@ def _row_to_model(row: aiosqlite.Row) -> InterviewSessionModel:
         transcript=row["transcript"],
         interview_length=row["interview_length"],
         role_title=row["role_title"],
+        target_company=row["target_company"],
         questions=_load_json_list(row["questions_json"], InterviewQuestionModel),
         answers=_load_json_list(row["answers_json"], InterviewAnswerModel),
         current_question_index=int(row["current_question_index"] or 0),
+        coding_round=_load_json_object(row["coding_round_json"], CodingInterviewRoundModel),
         score=row["score"],
         report=_load_json_object(row["report_json"], InterviewReportModel),
         is_completed=bool(row["is_completed"]),
@@ -191,6 +292,49 @@ class InterviewSessionRepository:
             if name in columns:
                 continue
             await conn.execute(f"ALTER TABLE InterviewSessions ADD COLUMN {name} {definition}")
+
+    async def _init_problem_bank(self, conn: aiosqlite.Connection) -> None:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS CodingProblems (
+                id TEXT PRIMARY KEY,
+                company TEXT NOT NULL,
+                difficulty TEXT NOT NULL,
+                title TEXT NOT NULL,
+                style_tags_json TEXT NOT NULL DEFAULT '[]',
+                problem_json TEXT NOT NULL
+            )
+            """
+        )
+
+        for raw_problem in DEFAULT_CODING_PROBLEMS:
+            problem = CodingProblemModel.model_validate(raw_problem)
+            await conn.execute(
+                """
+                INSERT INTO CodingProblems (
+                    id,
+                    company,
+                    difficulty,
+                    title,
+                    style_tags_json,
+                    problem_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    company = excluded.company,
+                    difficulty = excluded.difficulty,
+                    title = excluded.title,
+                    style_tags_json = excluded.style_tags_json,
+                    problem_json = excluded.problem_json
+                """,
+                (
+                    problem.id,
+                    problem.company,
+                    problem.difficulty,
+                    problem.title,
+                    _json_default(problem.style_tags),
+                    _json_default(problem.model_dump(mode="json")),
+                ),
+            )
 
     async def init_db(self) -> None:
         async with aiosqlite.connect(DATABASE_PATH) as conn:
@@ -211,9 +355,11 @@ class InterviewSessionRepository:
                     updated_at TEXT NOT NULL,
                     interview_length TEXT,
                     role_title TEXT,
+                    target_company TEXT,
                     questions_json TEXT NOT NULL DEFAULT '[]',
                     answers_json TEXT NOT NULL DEFAULT '[]',
                     current_question_index INTEGER NOT NULL DEFAULT 0,
+                    coding_round_json TEXT,
                     score INTEGER,
                     report_json TEXT,
                     completed_at TEXT
@@ -221,11 +367,11 @@ class InterviewSessionRepository:
                 """
             )
             await self._ensure_optional_columns(conn)
+            await self._init_problem_bank(conn)
             await conn.commit()
 
     async def add_interview_session(self, record: InterviewSessionModel) -> InterviewSessionModel:
         now = utcnow()
-        print(f"Adding session {record.id}", file=sys.stderr)
         async with aiosqlite.connect(DATABASE_PATH) as conn:
             await conn.execute(
                 """
@@ -241,16 +387,18 @@ class InterviewSessionRepository:
                     transcript,
                     interview_length,
                     role_title,
+                    target_company,
                     questions_json,
                     answers_json,
                     current_question_index,
+                    coding_round_json,
                     score,
                     report_json,
                     is_completed,
                     created_at,
                     updated_at,
                     completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(record.id),
@@ -264,9 +412,11 @@ class InterviewSessionRepository:
                     record.transcript,
                     record.interview_length,
                     record.role_title,
+                    record.target_company,
                     _serialize_questions(record.questions),
                     _serialize_answers(record.answers),
                     record.current_question_index,
+                    _serialize_coding_round(record.coding_round),
                     record.score,
                     _serialize_report(record.report),
                     int(record.is_completed),
@@ -281,6 +431,30 @@ class InterviewSessionRepository:
         if existing is None:
             raise RuntimeError("Failed to insert interview session")
         return existing
+
+    async def list_coding_problems(self) -> list[CodingProblemModel]:
+        async with aiosqlite.connect(DATABASE_PATH) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute("SELECT problem_json FROM CodingProblems ORDER BY company, title")
+            rows = await cursor.fetchall()
+
+        problems: list[CodingProblemModel] = []
+        for row in rows:
+            problem = _load_json_object(row["problem_json"], CodingProblemModel)
+            if isinstance(problem, CodingProblemModel):
+                problems.append(problem)
+        return problems
+
+    async def get_coding_problem(self, problem_id: str) -> CodingProblemModel | None:
+        async with aiosqlite.connect(DATABASE_PATH) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute("SELECT problem_json FROM CodingProblems WHERE id = ?", (problem_id,))
+            row = await cursor.fetchone()
+
+        if not row:
+            return None
+        problem = _load_json_object(row["problem_json"], CodingProblemModel)
+        return problem if isinstance(problem, CodingProblemModel) else None
 
     async def get_all_interview_sessions(self, user_id: UUID | None = None) -> list[InterviewSessionModel]:
         async with aiosqlite.connect(DATABASE_PATH) as conn:
@@ -354,9 +528,11 @@ class InterviewSessionRepository:
             transcript=transcript,
             interview_length=pick("interview_length"),
             role_title=pick("role_title"),
+            target_company=pick("target_company"),
             questions=pick("questions"),
             answers=pick("answers"),
             current_question_index=pick("current_question_index"),
+            coding_round=pick("coding_round"),
             score=pick("score"),
             report=pick("report"),
             is_completed=pick("is_completed"),
@@ -379,9 +555,11 @@ class InterviewSessionRepository:
                     transcript = ?,
                     interview_length = ?,
                     role_title = ?,
+                    target_company = ?,
                     questions_json = ?,
                     answers_json = ?,
                     current_question_index = ?,
+                    coding_round_json = ?,
                     score = ?,
                     report_json = ?,
                     is_completed = ?,
@@ -400,9 +578,11 @@ class InterviewSessionRepository:
                     updated_record.transcript,
                     updated_record.interview_length,
                     updated_record.role_title,
+                    updated_record.target_company,
                     _serialize_questions(updated_record.questions),
                     _serialize_answers(updated_record.answers),
                     updated_record.current_question_index,
+                    _serialize_coding_round(updated_record.coding_round),
                     updated_record.score,
                     _serialize_report(updated_record.report),
                     int(updated_record.is_completed),

@@ -11,8 +11,7 @@ import tempfile
 import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from pathlib import Path
-from statistics import mean
-from typing import Any, AsyncIterator
+from typing import Any
 from uuid import UUID
 
 import fastapi
@@ -24,7 +23,20 @@ import telemetry
 from pydantic import BaseModel, Field
 
 from auth_store import AuthRepository, UserModel
+from coding_interview_engine import (
+    CodingInterventionDecisionModel,
+    InterviewInterventionEngine,
+    apply_intervention,
+    build_ai_interviewer_prompt,
+    choose_coding_problem,
+    looks_like_clarification_request,
+    looks_like_reasoning_update,
+)
 from interview_data_store import (
+    CodingConversationTurnModel,
+    CodingInterviewEvaluationModel,
+    CodingInterviewEventModel,
+    CodingInterviewRoundModel,
     InterviewAnswerModel,
     InterviewQuestionFeedbackModel,
     InterviewQuestionModel,
@@ -38,6 +50,7 @@ from interview_data_store import (
 
 repo = InterviewSessionRepository()
 auth_repo = AuthRepository()
+intervention_engine = InterviewInterventionEngine()
 
 
 @contextlib.asynccontextmanager
@@ -56,86 +69,12 @@ otel_fastapi.FastAPIInstrumentor.instrument_app(app, exclude_spans=["send"])
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
-
-SYSTEM_PROMPT = (
-    "You are a professional interview coach who helps the user prepare "
-    "for behavioral and technical interview questions."
-)
-
 INTERVIEW_LENGTH_OPTIONS: dict[str, dict[str, int]] = {
     "short": {"behavioral": 2, "technical": 2},
     "medium": {"behavioral": 4, "technical": 4},
     "long": {"behavioral": 6, "technical": 6},
 }
 SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".md", ".html"}
-ACTION_VERBS = {
-    "built",
-    "created",
-    "delivered",
-    "designed",
-    "drove",
-    "improved",
-    "implemented",
-    "launched",
-    "led",
-    "optimized",
-    "reduced",
-    "resolved",
-    "scaled",
-    "shipped",
-}
-STAR_HINTS = {"situation", "task", "action", "result", "challenge", "outcome", "impact"}
-TECH_SIGNAL_WORDS = {
-    "architecture",
-    "latency",
-    "monitoring",
-    "performance",
-    "reliability",
-    "scalability",
-    "security",
-    "testing",
-    "tradeoff",
-    "trade-off",
-}
-COMMON_TECH_SKILLS = [
-    "python",
-    "java",
-    "javascript",
-    "typescript",
-    "react",
-    "angular",
-    "vue",
-    "node.js",
-    "node",
-    "fastapi",
-    "django",
-    "flask",
-    "spring",
-    "sql",
-    "postgresql",
-    "mysql",
-    "mongodb",
-    "redis",
-    "docker",
-    "kubernetes",
-    "aws",
-    "azure",
-    "gcp",
-    "terraform",
-    "graphql",
-    "rest",
-    "microservices",
-    "ci/cd",
-    "git",
-    "linux",
-    "pandas",
-    "machine learning",
-    "data engineering",
-    "spark",
-    "airflow",
-    "c#",
-    ".net",
-]
 
 
 def get_agent_base_url() -> str:
@@ -148,33 +87,26 @@ def get_agent_base_url() -> str:
 
 
 def get_openai_base_url() -> str:
-    return os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    return (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
 
 
-class ChatInputMessage(BaseModel):
-    role: str
-    content: str
+def get_openai_api_key() -> str:
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise fastapi.HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured")
+    return api_key
 
 
-class StartSessionResponse(BaseModel):
-    sessionId: str
-    systemPrompt: str
+def get_realtime_model() -> str:
+    return (os.getenv("OPENAI_REALTIME_MODEL") or "gpt-realtime").strip()
 
 
-class ChatStreamRequest(BaseModel):
-    sessionId: str = Field(min_length=1)
-    message: str = Field(min_length=1)
-    history: list[ChatInputMessage] = Field(default_factory=list)
+def get_realtime_transcription_model() -> str:
+    return (os.getenv("OPENAI_REALTIME_TRANSCRIPTION_MODEL") or "gpt-realtime-whisper").strip()
 
 
 class InterviewSessionRecordRequest(BaseModel):
     record: InterviewSessionModel
-
-
-class VoiceSessionRequest(BaseModel):
-    voice: str = "alloy"
-    model: str = os.getenv("OPENAI_MODEL", "gpt-4o-realtime-preview")
-    instructions: str | None = None
 
 
 class RegisterRequest(BaseModel):
@@ -201,10 +133,21 @@ class InterviewCreateRequest(BaseModel):
     resume_text: str = Field(min_length=1)
     job_description_text: str = Field(min_length=1)
     interview_length: str = Field(pattern="^(short|medium|long)$")
+    target_company: str | None = Field(default=None, max_length=80)
+    coding_difficulty: str = Field(default="medium", pattern="^(easy|medium|hard)$")
+    interviewer_mode: str = Field(default="neutral", pattern="^(warm|neutral|bar_raiser|silent)$")
+    preferred_language: str = Field(default="typescript", pattern="^(typescript|javascript|python|java|csharp)$")
 
 
 class InterviewAnswerRequest(BaseModel):
     answer_text: str = Field(min_length=1)
+
+
+class InterviewFinishRequest(BaseModel):
+    answer_text: str | None = None
+    code: str | None = None
+    language: str | None = Field(default=None, pattern="^(typescript|javascript|python|java|csharp)$")
+    transcript_recent: str = ""
 
 
 class InterviewHelpResponse(BaseModel):
@@ -216,6 +159,7 @@ class InterviewHistoryItem(BaseModel):
     id: str
     role_title: str
     interview_length: str | None = None
+    target_company: str | None = None
     question_count: int
     answered_count: int
     is_completed: bool
@@ -224,42 +168,41 @@ class InterviewHistoryItem(BaseModel):
     completed_at: str | None = None
 
 
-def _extract_text(event_payload: Any) -> str:
-    if isinstance(event_payload, str):
-        return event_payload
-
-    if not isinstance(event_payload, dict):
-        return ""
-
-    direct = event_payload.get("delta") or event_payload.get("text") or event_payload.get("content")
-    if isinstance(direct, str):
-        return direct
-
-    if isinstance(direct, list):
-        flattened = []
-        for item in direct:
-            if isinstance(item, str):
-                flattened.append(item)
-            elif isinstance(item, dict) and isinstance(item.get("text"), str):
-                flattened.append(item["text"])
-        if flattened:
-            return "".join(flattened)
-
-    message = event_payload.get("message")
-    if isinstance(message, dict):
-        nested = message.get("content") or message.get("text")
-        if isinstance(nested, str):
-            return nested
-
-    output = event_payload.get("output")
-    if isinstance(output, str):
-        return output
-
-    return ""
+class CodingEventRequest(BaseModel):
+    event: CodingInterviewEventModel
+    code: str = ""
+    language: str | None = Field(default=None, pattern="^(typescript|javascript|python|java|csharp)$")
+    transcript_append: str = ""
 
 
-def _to_sse(payload: dict[str, Any]) -> str:
-    return f"data: {json.dumps(payload)}\n\n"
+class CodingInterventionRequest(BaseModel):
+    problem_id: str = Field(min_length=1)
+    code: str = ""
+    language: str = Field(pattern="^(typescript|javascript|python|java|csharp)$")
+    transcript_recent: str = ""
+    recent_events: list[CodingInterviewEventModel] = Field(default_factory=list)
+    elapsed_time_seconds: int = Field(ge=0)
+
+
+class CodingInterventionResponse(BaseModel):
+    should_interrupt: bool
+    reason: str | None = None
+    question: str | None = None
+    severity: str = "none"
+    reply: str | None = None
+    coding_round: CodingInterviewRoundModel | None = None
+
+
+class CodingRealtimeSessionRequest(BaseModel):
+    sdp: str = Field(min_length=1)
+    voice: str | None = Field(default=None, max_length=40)
+
+
+class CodingRealtimeSessionResponse(BaseModel):
+    sdp: str
+    model: str
+    voice: str
+    transcription_model: str
 
 
 def _truncate(text: str, limit: int = 240) -> str:
@@ -361,173 +304,278 @@ def _extract_role_title(job_description_text: str) -> str:
     return "Target role"
 
 
-def _extract_skill_keywords(resume_text: str, job_description_text: str, limit: int = 6) -> list[str]:
-    combined = f"{resume_text}\n{job_description_text}".lower()
-    found: list[str] = []
-    for skill in COMMON_TECH_SKILLS:
-        if skill.lower() in combined and skill not in found:
-            found.append(skill)
-        if len(found) >= limit:
-            return found
+def _agent_timeout_for_path(path: str) -> float:
+    return {
+        "/interview/plan": 120.0,
+        "/interview/report": 120.0,
+        "/interview/help": 45.0,
+        "/coding/reply": 45.0,
+        "/coding/evaluate": 90.0,
+    }.get(path, 60.0)
 
-    tokens = re.findall(r"[A-Za-z][A-Za-z0-9.+#/:-]{2,}", combined)
-    stop_words = {
-        "about",
-        "across",
-        "candidate",
-        "company",
-        "customer",
-        "deliver",
-        "experience",
-        "interview",
-        "manage",
-        "product",
-        "project",
-        "responsible",
-        "strong",
-        "team",
-        "teams",
-        "work",
+
+def _build_realtime_session_config(*, voice: str) -> dict[str, Any]:
+    return {
+        "type": "realtime",
+        "model": get_realtime_model(),
+        "output_modalities": ["audio"],
+        "instructions": (
+            "You are the voice transport layer for a coding interview application. "
+            "Continuously transcribe the candidate's speech. "
+            "Do not proactively answer the candidate or ask questions on your own. "
+            "The application will decide interviewer replies separately. "
+            "When the application explicitly requests audio output, read the provided interviewer text naturally "
+            "and keep the wording exact."
+        ),
+        "audio": {
+            "input": {
+                "turn_detection": {
+                    "type": "server_vad",
+                    "create_response": False,
+                    "interrupt_response": False,
+                    "silence_duration_ms": 900,
+                    "prefix_padding_ms": 300,
+                },
+                "transcription": {
+                    "model": get_realtime_transcription_model(),
+                    "language": "en",
+                },
+            },
+            "output": {
+                "voice": voice,
+            },
+        },
     }
-    for token in tokens:
-        if token in stop_words or token in found or token.isdigit():
-            continue
-        found.append(token)
-        if len(found) >= limit:
-            break
-    return found or ["problem solving", "system design", "collaboration"]
 
 
-def _extract_resume_focus(resume_text: str) -> str:
-    lines = [line.strip(" -*") for line in resume_text.splitlines() if line.strip()]
-    for line in lines:
-        if len(line.split()) < 6:
-            continue
-        return _safe_excerpt(line, 120)
-    return "recent experience"
+async def _create_realtime_call(*, sdp_offer: str, voice: str, current_user: UserModel) -> str:
+    user_id_text = str(current_user.id)
+    session_config = _build_realtime_session_config(voice=voice)
+    files = {
+        "sdp": (None, sdp_offer),
+        "session": (None, json.dumps(session_config), "application/json"),
+    }
+    headers = {
+        "Authorization": f"Bearer {get_openai_api_key()}",
+        "OpenAI-Safety-Identifier": hashlib.sha256(user_id_text.encode("utf-8")).hexdigest(),
+    }
 
-
-def _build_behavioral_questions(role_title: str, resume_text: str, count: int) -> list[InterviewQuestionModel]:
-    background = _extract_resume_focus(resume_text)
-    templates = [
-        f"Tell me about a time you used your {background} to deliver a meaningful result. What was the situation, what actions did you take, and what changed because of your work?",
-        f"Describe a moment when priorities shifted while you were working toward a {role_title} goal. How did you adapt and keep the work moving?",
-        f"Walk me through a situation where you had to influence teammates or stakeholders without direct authority. What approach did you use and what was the outcome?",
-        f"Share an example of a setback or failure from your previous work. How did you respond, and what did you learn that would make you stronger in this role?",
-        f"Describe a time when you had to balance speed with quality on a deadline-sensitive project. How did you make tradeoffs and communicate them?",
-        f"Tell me about a time you improved a process, workflow, or collaboration habit. What problem were you solving and how did you measure success?",
-    ]
-    return [
-        InterviewQuestionModel(
-            id=f"behavioral-{index + 1}",
-            order=index + 1,
-            category="behavioral",
-            prompt=templates[index],
-        )
-        for index in range(count)
-    ]
-
-
-def _build_technical_questions(
-    role_title: str,
-    resume_text: str,
-    job_description_text: str,
-    count: int,
-) -> list[InterviewQuestionModel]:
-    skills = _extract_skill_keywords(resume_text, job_description_text, limit=max(count, 6))
-    jd_excerpt = _safe_excerpt(job_description_text, 180)
-    templates = [
-        "The job description emphasizes {skill}. How would you apply it in a real {role_title} scenario, and what tradeoffs would you watch closely?",
-        "Imagine you inherit a partially working feature area tied to {skill}. How would you diagnose the current state, de-risk changes, and ship improvements safely?",
-        "Describe how you would design or structure a solution around {skill} for this team. What would you optimize for first, and why?",
-        "What failure modes or edge cases do you associate with {skill}, and how would you test or monitor for them in production?",
-        "Based on this brief from the role, `{jd_excerpt}`, what technical questions would you ask before implementation, and how would those answers shape your design?",
-        "Tell me about a technically challenging problem related to {skill}. How would you break it down, prioritize the work, and validate the final result?",
-    ]
-
-    questions: list[InterviewQuestionModel] = []
-    for index in range(count):
-        skill = skills[index % len(skills)]
-        prompt = templates[index % len(templates)].format(
-            skill=skill,
-            role_title=role_title,
-            jd_excerpt=jd_excerpt,
-        )
-        questions.append(
-            InterviewQuestionModel(
-                id=f"technical-{index + 1}",
-                order=len(questions) + 1,
-                category="technical",
-                prompt=prompt,
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{get_openai_base_url()}/realtime/calls",
+                files=files,
+                headers=headers,
             )
-        )
-    return questions
-
-
-def _generate_fallback_questions(
-    resume_text: str,
-    job_description_text: str,
-    interview_length: str,
-) -> tuple[str, list[InterviewQuestionModel]]:
-    counts = INTERVIEW_LENGTH_OPTIONS[interview_length]
-    role_title = _extract_role_title(job_description_text)
-    behavioral = _build_behavioral_questions(role_title, resume_text, counts["behavioral"])
-    technical = _build_technical_questions(role_title, resume_text, job_description_text, counts["technical"])
-
-    questions: list[InterviewQuestionModel] = []
-    for question in behavioral + technical:
-        questions.append(
-            InterviewQuestionModel(
-                id=question.id,
-                order=len(questions) + 1,
-                category=question.category,
-                prompt=question.prompt,
-            )
-        )
-
-    return role_title, questions
+            response.raise_for_status()
+            sdp_answer = response.text
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text.strip() or "Failed to initialize realtime voice session"
+        raise fastapi.HTTPException(status_code=502, detail=detail) from exc
+    except httpx.HTTPError as exc:
+        raise fastapi.HTTPException(status_code=502, detail="Realtime voice session unavailable") from exc
+    return sdp_answer
 
 
 async def _post_agent_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
-    trace_id = uuid.uuid4().hex[:12]
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            f"{get_agent_base_url()}{path}",
-            json=payload,
-            headers={"x-trace-id": trace_id},
-        )
-        response.raise_for_status()
+    timeout_seconds = _agent_timeout_for_path(path)
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            response = await client.post(
+                f"{get_agent_base_url()}{path}",
+                json=payload,
+                headers={"x-trace-id": uuid.uuid4().hex[:12]},
+            )
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text.strip() or f"Agent request failed for {path}"
+        raise fastapi.HTTPException(status_code=502, detail=detail) from exc
+    except httpx.HTTPError as exc:
+        raise fastapi.HTTPException(status_code=502, detail=f"Agent service unavailable for {path}") from exc
+
+    try:
         data = response.json()
-        if not isinstance(data, dict):
-            raise RuntimeError("Agent service returned a non-object response")
-        return data
+    except ValueError as exc:
+        raise fastapi.HTTPException(status_code=502, detail=f"Agent service returned invalid JSON for {path}") from exc
+    if not isinstance(data, dict):
+        raise fastapi.HTTPException(status_code=502, detail=f"Agent service returned an invalid payload for {path}")
+    return data
+
+
+def _coding_event_needs_reply(recent_events: list[CodingInterviewEventModel], transcript_recent: str) -> bool:
+    if transcript_recent.strip():
+        return any(
+            event.type in {"candidate_spoke", "clarification_asked", "solution_explained", "candidate_pause"}
+            for event in recent_events
+        )
+    return False
+
+
+def _should_send_coding_reply(
+    round_state: CodingInterviewRoundModel,
+    recent_events: list[CodingInterviewEventModel],
+    transcript_recent: str,
+    decision: CodingInterventionDecisionModel | None = None,
+) -> bool:
+    if not _coding_event_needs_reply(recent_events, transcript_recent):
+        return bool(decision and decision.should_interrupt and decision.question)
+
+    if decision and decision.should_interrupt and decision.question:
+        return True
+
+    latest_event = recent_events[-1] if recent_events else None
+    latest_text = _normalize_whitespace(transcript_recent)
+    if not latest_event or not latest_text:
+        return False
+
+    if latest_event.type == "clarification_asked" or looks_like_clarification_request(latest_text):
+        return True
+
+    if latest_event.type in {"candidate_pause", "solution_explained"}:
+        return True
+
+    # Let the candidate continue coding after ordinary reasoning updates instead of
+    # turning every spoken thought into a new interviewer question.
+    if latest_event.type == "candidate_spoke":
+        if _candidate_answered_latest_interviewer_turn(round_state, transcript_recent):
+            return False
+        return False
+
+    return False
+
+
+def _latest_coding_interviewer_turn(round_state: CodingInterviewRoundModel) -> CodingConversationTurnModel | None:
+    for turn in reversed(round_state.conversation):
+        if turn.role == "interviewer" and turn.content.strip():
+            return turn
+    return None
+
+
+def _conversation_has_recent_duplicate(round_state: CodingInterviewRoundModel, reply: str) -> bool:
+    cleaned = _normalize_whitespace(reply)
+    if not cleaned:
+        return False
+    recent_interviewer_lines = [
+        _normalize_whitespace(turn.content)
+        for turn in round_state.conversation[-4:]
+        if turn.role == "interviewer"
+    ]
+    return cleaned in recent_interviewer_lines
+
+
+def _candidate_answered_latest_interviewer_turn(
+    round_state: CodingInterviewRoundModel,
+    transcript_recent: str,
+) -> bool:
+    latest_interviewer = _latest_coding_interviewer_turn(round_state)
+    if latest_interviewer is None or not transcript_recent.strip():
+        return False
+
+    lowered_question = _normalize_whitespace(latest_interviewer.content).lower()
+    lowered_answer = _normalize_whitespace(transcript_recent).lower()
+
+    if looks_like_clarification_request(lowered_answer):
+        return False
+
+    if "time and space complexity" in lowered_question:
+        return any(
+            token in lowered_answer
+            for token in ("time complexity", "space complexity", "big o", "o(", "linear", "constant", "quadratic")
+        )
+    if "edge case" in lowered_question:
+        return any(token in lowered_answer for token in ("edge", "empty", "null", "zero", "duplicate", "negative"))
+    if "trade-off" in lowered_question or "tradeoff" in lowered_question:
+        return any(token in lowered_answer for token in ("tradeoff", "trade-off", "because", "memory", "space", "time"))
+    if "what approach are you leaning toward" in lowered_question:
+        return looks_like_reasoning_update(lowered_answer)
+    if "talk me through" in lowered_question or "what is blocking you" in lowered_question:
+        return looks_like_reasoning_update(lowered_answer)
+    return False
+
+
+def _build_problem_clarification_reply(round_state: CodingInterviewRoundModel) -> str:
+    problem = round_state.problem
+    if problem is None:
+        return "Restate the input, the output you need to produce, and the main constraints before you pick an approach."
+
+    example = problem.examples[0] if problem.examples else None
+    example_text = (
+        f" For example, {example.input} should produce {example.output}."
+        if example
+        else ""
+    )
+    constraints = ", ".join(problem.constraints[:2]).strip()
+    constraints_text = f" Keep in mind: {constraints}." if constraints else ""
+    return _normalize_whitespace(
+        f"The task is to {problem.prompt}.{example_text}{constraints_text}"
+    )
+
+
+async def _generate_coding_interviewer_reply(
+    *,
+    round_state: CodingInterviewRoundModel,
+    recent_events: list[CodingInterviewEventModel],
+    transcript_recent: str,
+    code: str,
+    decision: CodingInterventionDecisionModel | None = None,
+) -> str | None:
+    if not _should_send_coding_reply(round_state, recent_events, transcript_recent, decision):
+        return decision.question if decision and decision.should_interrupt else None
+
+    if looks_like_clarification_request(transcript_recent):
+        return _build_problem_clarification_reply(round_state)
+
+    if not round_state.problem:
+        raise fastapi.HTTPException(status_code=500, detail="Coding round is missing its problem definition")
+
+    payload = await _post_agent_json(
+        "/coding/reply",
+        {
+            "interviewer_prompt": round_state.interviewer_prompt or "",
+            "interviewer_mode": round_state.interviewer_mode,
+            "problem_title": round_state.problem.title,
+            "problem_prompt": round_state.problem.prompt,
+            "problem_constraints": round_state.problem.constraints,
+            "problem_examples": [example.model_dump(mode="json") for example in round_state.problem.examples[:3]],
+            "edge_case_hints": round_state.problem.edge_case_hints,
+            "complexity_target": round_state.problem.complexity_target,
+            "recent_event_types": [event.type for event in recent_events],
+            "transcript_recent": transcript_recent.strip(),
+            "current_code": _safe_excerpt(code[-1600:], 1600),
+            "conversation": [turn.model_dump(mode="json") for turn in round_state.conversation[-8:]],
+            "forced_followup": decision.question if decision and decision.should_interrupt else None,
+        },
+    )
+
+    reply = _normalize_whitespace(str(payload.get("reply") or ""))
+    if not reply:
+        raise fastapi.HTTPException(status_code=502, detail="Coding interviewer returned an empty reply")
+    if _conversation_has_recent_duplicate(round_state, reply):
+        raise fastapi.HTTPException(status_code=502, detail="Coding interviewer returned a duplicate reply")
+    return reply
 
 
 async def _generate_ai_questions(
     resume_text: str,
     job_description_text: str,
     interview_length: str,
-) -> tuple[str, list[InterviewQuestionModel]] | None:
+) -> tuple[str, list[InterviewQuestionModel]]:
     counts = INTERVIEW_LENGTH_OPTIONS[interview_length]
-    try:
-        payload = await _post_agent_json(
-            "/interview/plan",
-            {
-                "resume_text": resume_text,
-                "job_description_text": job_description_text,
-                "interview_length": interview_length,
-                "behavioral_count": counts["behavioral"],
-                "technical_count": counts["technical"],
-            },
-        )
-    except Exception:
-        logger.exception("agent interview plan failed; using fallback generation")
-        return None
+    payload = await _post_agent_json(
+        "/interview/plan",
+        {
+            "resume_text": resume_text,
+            "job_description_text": job_description_text,
+            "interview_length": interview_length,
+            "behavioral_count": counts["behavioral"],
+            "technical_count": counts["technical"],
+        },
+    )
 
     role_title = _to_sentence_case(str(payload.get("role_title") or "")) or _extract_role_title(job_description_text)
     raw_questions = payload.get("questions")
     if not isinstance(raw_questions, list):
-        return None
+        raise fastapi.HTTPException(status_code=502, detail="Interview planner returned an invalid questions payload")
 
     questions: list[InterviewQuestionModel] = []
     for index, raw_question in enumerate(raw_questions, start=1):
@@ -548,170 +596,88 @@ async def _generate_ai_questions(
 
     expected_count = counts["behavioral"] + counts["technical"]
     if len(questions) != expected_count:
-        return None
+        raise fastapi.HTTPException(
+            status_code=502,
+            detail=f"Interview planner returned {len(questions)} questions instead of {expected_count}",
+        )
 
     return role_title, questions
 
 
-def _score_answer(answer_text: str, category: str, question_prompt: str, skill_keywords: list[str]) -> tuple[int, str]:
-    cleaned = answer_text.strip()
-    words = re.findall(r"\b[\w+#./-]+\b", cleaned)
-    word_count = len(words)
-    lowered = cleaned.lower()
-
-    score = 2
-    if word_count >= 35:
-        score += 2
-    if word_count >= 80:
-        score += 2
-    if any(char.isdigit() for char in cleaned):
-        score += 1
-    if any(verb in lowered for verb in ACTION_VERBS):
-        score += 1
-
-    if category == "behavioral":
-        if sum(1 for hint in STAR_HINTS if hint in lowered) >= 2:
-            score += 2
-        feedback = (
-            "Your answer becomes stronger when it clearly lays out the situation, the action you personally took, "
-            "and the measurable result."
-        )
-    else:
-        relevant_keywords = {item.lower() for item in skill_keywords}
-        relevant_keywords.update(word.lower() for word in re.findall(r"\b[\w+#./-]+\b", question_prompt) if len(word) > 4)
-        overlap = sum(1 for token in relevant_keywords if token and token in lowered)
-        if overlap >= 2:
-            score += 2
-        if any(signal in lowered for signal in TECH_SIGNAL_WORDS):
-            score += 1
-        feedback = (
-            "Your technical answer is strongest when it explains the tradeoffs, the implementation approach, "
-            "and how you would validate the solution in practice."
-        )
-
-    score = max(1, min(score, 10))
-    return score, feedback
-
-
-def _build_fallback_report(
+async def _build_coding_round(
+    *,
+    target_company: str | None,
+    difficulty: str,
+    interviewer_mode: str,
+    preferred_language: str,
     role_title: str,
-    resume_text: str,
     job_description_text: str,
-    answers: list[InterviewAnswerModel],
-) -> tuple[int, InterviewReportModel]:
-    skill_keywords = _extract_skill_keywords(resume_text, job_description_text, limit=8)
-    feedback_items: list[InterviewQuestionFeedbackModel] = []
-    behavioral_scores: list[int] = []
-    technical_scores: list[int] = []
-    answer_lengths = [len(re.findall(r"\b[\w+#./-]+\b", answer.answer_text)) for answer in answers]
+) -> CodingInterviewRoundModel | None:
+    problems = await repo.list_coding_problems()
+    if not problems:
+        return None
 
-    for answer in answers:
-        score, default_feedback = _score_answer(
-            answer.answer_text,
-            answer.category,
-            answer.question_prompt,
-            skill_keywords,
-        )
-        if answer.category == "behavioral":
-            behavioral_scores.append(score)
-        else:
-            technical_scores.append(score)
+    selection = choose_coding_problem(
+        problems=problems,
+        target_company=target_company,
+        desired_difficulty=difficulty,
+        role_title=role_title,
+        job_description_text=job_description_text,
+    )
+    starter_code = selection.problem.starter_code.get(preferred_language) or next(
+        iter(selection.problem.starter_code.values()),
+        "",
+    )
 
-        word_count = len(re.findall(r"\b[\w+#./-]+\b", answer.answer_text))
-        if word_count < 45:
-            detail = "Add more context and concrete detail so the evaluator can understand your decision-making."
-        elif score >= 8:
-            detail = "This answer showed strong structure and specificity. Keep that level of precision throughout the interview."
-        else:
-            detail = default_feedback
-
-        feedback_items.append(
-            InterviewQuestionFeedbackModel(
-                question_id=answer.question_id,
-                score=score,
-                feedback=detail,
+    return CodingInterviewRoundModel(
+        target_company=(target_company or "").strip() or None,
+        matched_company=selection.matched_company,
+        selection_strategy=selection.selection_strategy,
+        interviewer_mode=interviewer_mode,
+        difficulty=difficulty,
+        problem=selection.problem,
+        language=preferred_language,
+        editor_mode="plain" if difficulty == "hard" else "monaco",
+        current_code=starter_code,
+        interviewer_prompt=build_ai_interviewer_prompt(interviewer_mode, selection.problem),
+        conversation=[
+            CodingConversationTurnModel(
+                role="interviewer",
+                content=(
+                    "Let's work through this problem together. Talk me through your approach as you go, "
+                    "and ask if you want any clarification on the prompt."
+                ),
+                kind="opening",
             )
-        )
-
-    all_scores = [item.score for item in feedback_items] or [5]
-    overall_score = int(round(mean(all_scores) * 10))
-    behavioral_avg = mean(behavioral_scores) if behavioral_scores else 5.0
-    technical_avg = mean(technical_scores) if technical_scores else 5.0
-    average_length = mean(answer_lengths) if answer_lengths else 0.0
-
-    strengths: list[str] = []
-    improvements: list[str] = []
-
-    if average_length >= 75:
-        strengths.append("You gave developed answers instead of relying on one-line responses.")
-    if behavioral_avg >= 7.0:
-        strengths.append("Your behavioral stories showed ownership and tangible outcomes.")
-    if technical_avg >= 7.0:
-        strengths.append("Your technical answers demonstrated practical thinking and solution framing.")
-    if not strengths:
-        strengths.append("You stayed engaged through the full interview flow and completed every question.")
-
-    if behavioral_avg < 7.0:
-        improvements.append("Use a tighter STAR structure so behavioral answers land with clearer context, action, and impact.")
-    if technical_avg < 7.0:
-        improvements.append("Explain technical tradeoffs more explicitly, especially around testing, failure modes, and scale.")
-    if average_length < 55:
-        improvements.append("Expand your answers with more evidence, metrics, and implementation detail.")
-    if not improvements:
-        improvements.append("Push the next iteration further by connecting each answer more directly to the target role.")
-
-    summary = (
-        f"You completed a {len(answers)}-question interview simulation for a {role_title.lower()} track "
-        f"with an overall score of {overall_score}/100."
+        ],
     )
-    recommendation = (
-        "You are trending toward interview-readiness, but your next gains will come from sharper examples and "
-        "clearer technical tradeoff explanations."
-        if overall_score < 80
-        else "You are performing at a strong mock-interview level. Keep sharpening precision and role-specific depth."
-    )
-
-    report = InterviewReportModel(
-        summary=summary,
-        strengths=strengths,
-        improvements=improvements,
-        behavioral_feedback=(
-            f"Behavioral performance averaged {behavioral_avg:.1f}/10. "
-            "Your stories improve when you make the stakes, your individual actions, and the measurable result explicit."
-        ),
-        technical_feedback=(
-            f"Technical performance averaged {technical_avg:.1f}/10. "
-            "The strongest answers connected architecture choices to practical tradeoffs and validation steps."
-        ),
-        communication_feedback=(
-            "Your communication is strongest when you use concise structure up front and then add concrete evidence. "
-            "Avoid drifting into abstract statements without examples."
-        ),
-        recommendation=recommendation,
-        question_feedback=feedback_items,
-    )
-    return overall_score, report
 
 
 async def _generate_ai_report(
     session: InterviewSessionModel,
     answers: list[InterviewAnswerModel],
-) -> tuple[int, InterviewReportModel] | None:
-    try:
-        payload = await _post_agent_json(
-            "/interview/report",
-            {
-                "resume_text": session.resume_text or "",
-                "job_description_text": session.job_description_text or "",
-                "interview_length": session.interview_length or "medium",
-                "role_title": session.role_title or _extract_role_title(session.job_description_text or ""),
-                "questions": [question.model_dump(mode="json") for question in session.questions],
-                "answers": [answer.model_dump(mode="json") for answer in answers],
-            },
-        )
-    except Exception:
-        logger.exception("agent interview report failed; using fallback report")
-        return None
+) -> tuple[int, InterviewReportModel]:
+    payload = await _post_agent_json(
+        "/interview/report",
+        {
+            "resume_text": session.resume_text or "",
+            "job_description_text": session.job_description_text or "",
+            "interview_length": session.interview_length or "medium",
+            "role_title": session.role_title or _extract_role_title(session.job_description_text or ""),
+            "questions": [question.model_dump(mode="json") for question in session.questions],
+            "answers": [answer.model_dump(mode="json") for answer in answers],
+            "coding_feedback_input": (
+                session.coding_round.evaluation.summary
+                if session.coding_round and session.coding_round.evaluation
+                else None
+            ),
+            "coding_hire_recommendation": (
+                session.coding_round.evaluation.hire_recommendation
+                if session.coding_round and session.coding_round.evaluation
+                else None
+            ),
+        },
+    )
 
     try:
         raw_feedback = payload.get("question_feedback", [])
@@ -729,13 +695,16 @@ async def _generate_ai_report(
             communication_feedback=str(payload.get("communication_feedback") or "").strip(),
             recommendation=str(payload.get("recommendation") or "").strip(),
             question_feedback=question_feedback,
+            coding_feedback=str(payload.get("coding_feedback") or "").strip(),
+            coding_evaluation=session.coding_round.evaluation if session.coding_round else None,
+            hire_recommendation=str(payload.get("hire_recommendation") or "").strip(),
         )
         score = int(payload.get("score"))
-    except Exception:
-        return None
+    except Exception as exc:
+        raise fastapi.HTTPException(status_code=502, detail="Interview report agent returned an invalid payload") from exc
 
     if not report.summary or not report.recommendation:
-        return None
+        raise fastapi.HTTPException(status_code=502, detail="Interview report agent returned an incomplete report")
 
     return max(1, min(score, 100)), report
 
@@ -744,61 +713,49 @@ async def _generate_ai_help(
     help_kind: str,
     session: InterviewSessionModel,
     question: InterviewQuestionModel,
-) -> str | None:
-    try:
-        payload = await _post_agent_json(
-            "/interview/help",
-            {
-                "help_kind": help_kind,
-                "role_title": session.role_title or _extract_role_title(session.job_description_text or ""),
-                "question": question.model_dump(mode="json"),
-                "resume_text": session.resume_text or "",
-                "job_description_text": session.job_description_text or "",
-            },
-        )
-    except Exception:
-        logger.exception("agent interview help failed; using fallback help")
-        return None
+) -> str:
+    payload = await _post_agent_json(
+        "/interview/help",
+        {
+            "help_kind": help_kind,
+            "role_title": session.role_title or _extract_role_title(session.job_description_text or ""),
+            "question": question.model_dump(mode="json"),
+            "resume_text": session.resume_text or "",
+            "job_description_text": session.job_description_text or "",
+        },
+    )
 
     content = _normalize_whitespace(str(payload.get("content") or ""))
-    return content or None
+    if not content:
+        raise fastapi.HTTPException(status_code=502, detail="Interview help agent returned empty content")
+    return content
 
 
-def _build_hint(question: InterviewQuestionModel, session: InterviewSessionModel) -> str:
-    if question.category == "behavioral":
-        return (
-            "Use a tight STAR structure: set the situation, state the goal, explain the actions you personally took, "
-            "and close with a measurable result that connects back to the role."
-        )
+async def _generate_ai_coding_evaluation(
+    round_state: CodingInterviewRoundModel,
+) -> CodingInterviewEvaluationModel:
+    if round_state.problem is None:
+        raise fastapi.HTTPException(status_code=500, detail="Coding round is missing its problem definition")
 
-    skills = _extract_skill_keywords(session.resume_text or "", session.job_description_text or "", limit=3)
-    anchor = ", ".join(skills[:2]) if skills else "the core technologies in the job description"
-    return (
-        f"Anchor your answer around the main tradeoffs, implementation steps, and validation approach for {anchor}. "
-        "Mention how you would design, test, and monitor the solution."
+    payload = await _post_agent_json(
+        "/coding/evaluate",
+        {
+            "problem_title": round_state.problem.title,
+            "problem_prompt": round_state.problem.prompt,
+            "difficulty": round_state.difficulty,
+            "language": round_state.language,
+            "complexity_target": round_state.problem.complexity_target,
+            "current_code": round_state.current_code,
+            "transcript": round_state.transcript,
+            "conversation": [turn.model_dump(mode="json") for turn in round_state.conversation],
+            "event_log": [event.model_dump(mode="json") for event in round_state.event_log],
+        },
     )
 
-
-def _build_model_answer(question: InterviewQuestionModel, session: InterviewSessionModel) -> str:
-    role_title = session.role_title or _extract_role_title(session.job_description_text or "")
-    if question.category == "behavioral":
-        return (
-            "A strong answer would briefly establish the situation, explain the goal, and then focus on the actions "
-            "you personally took. For example: I was responsible for a high-priority deliverable with shifting "
-            "requirements, so I aligned stakeholders on the new scope, broke the work into smaller milestones, and "
-            "communicated risks early. That kept the team focused, reduced rework, and led to a successful outcome "
-            "with measurable impact. The key is to sound specific, show ownership, and finish with the result."
-        )
-
-    skills = _extract_skill_keywords(session.resume_text or "", session.job_description_text or "", limit=4)
-    primary_skill = skills[0] if skills else "the required stack"
-    return (
-        f"A strong answer for this {role_title.lower()} question would explain the approach end to end. Start by "
-        f"describing the problem and the main constraints, then propose a solution using {primary_skill}. After that, "
-        "cover tradeoffs such as performance, reliability, security, and developer velocity. Close by explaining how "
-        "you would test the implementation, monitor it in production, and iterate if the first version exposes new "
-        "risks. The best responses are concrete and pragmatic rather than purely theoretical."
-    )
+    try:
+        return CodingInterviewEvaluationModel.model_validate(payload)
+    except Exception as exc:
+        raise fastapi.HTTPException(status_code=502, detail="Coding evaluation agent returned an invalid payload") from exc
 
 
 def _session_transcript_entry(question: InterviewQuestionModel, answer_text: str) -> str:
@@ -813,6 +770,7 @@ def _history_item_from_session(session: InterviewSessionModel) -> InterviewHisto
         id=str(session.id),
         role_title=session.role_title or _extract_role_title(session.job_description_text or "") or "Interview",
         interview_length=session.interview_length,
+        target_company=session.target_company,
         question_count=len(session.questions),
         answered_count=len(session.answers),
         is_completed=session.is_completed,
@@ -822,94 +780,114 @@ def _history_item_from_session(session: InterviewSessionModel) -> InterviewHisto
     )
 
 
-async def _read_agent_stream(
-    response: httpx.Response,
+def _append_coding_round_state(
+    round_state: CodingInterviewRoundModel,
     *,
-    trace_id: str,
-) -> AsyncIterator[dict[str, Any]]:
-    is_sse = "text/event-stream" in response.headers.get("content-type", "")
-    logger.debug("[trace=%s] agent stream opened is_sse=%s", trace_id, is_sse)
+    event: CodingInterviewEventModel | None = None,
+    code: str | None = None,
+    language: str | None = None,
+    transcript_append: str = "",
+) -> CodingInterviewRoundModel:
+    transcript_bits = [round_state.transcript.strip()] if round_state.transcript.strip() else []
+    if transcript_append.strip():
+        transcript_bits.append(transcript_append.strip())
+    elif event and event.transcript_excerpt:
+        transcript_bits.append(event.transcript_excerpt.strip())
 
-    if not is_sse:
-        async for chunk in response.aiter_text():
-            if chunk:
-                yield {"type": "delta", "delta": chunk}
-        return
+    next_events = round_state.event_log
+    if event is not None:
+        next_events = [*round_state.event_log, event]
 
-    pending_data_lines: list[str] = []
+    return round_state.model_copy(
+        update={
+            "current_code": code if code is not None else round_state.current_code,
+            "language": language or round_state.language,
+            "transcript": "\n".join(bit for bit in transcript_bits if bit).strip(),
+            "event_log": next_events,
+        }
+    )
 
-    def _flush_event_data(lines: list[str]) -> str:
-        if not lines:
-            return ""
-        return "\n".join(lines).strip()
 
-    async for raw_line in response.aiter_lines():
-        line = raw_line.rstrip("\r")
+def _append_coding_conversation_turn(
+    round_state: CodingInterviewRoundModel,
+    *,
+    role: str,
+    content: str,
+    kind: str = "message",
+    source_event_type: str | None = None,
+    severity: str | None = None,
+) -> CodingInterviewRoundModel:
+    cleaned = _normalize_whitespace(content)
+    if not cleaned:
+        return round_state
 
-        if line == "":
-            data = _flush_event_data(pending_data_lines)
-            pending_data_lines = []
-            if not data:
-                continue
+    existing = round_state.conversation[-1] if round_state.conversation else None
+    if existing and existing.role == role and _normalize_whitespace(existing.content) == cleaned:
+        return round_state
 
-            try:
-                parsed = json.loads(data)
-            except json.JSONDecodeError:
-                logger.debug("[trace=%s] dropped malformed sse chunk", trace_id)
-                continue
+    return round_state.model_copy(
+        update={
+            "conversation": [
+                *round_state.conversation,
+                CodingConversationTurnModel(
+                    role=role,
+                    content=cleaned,
+                    kind=kind,
+                    source_event_type=source_event_type,
+                    severity=severity,
+                ),
+            ]
+        }
+    )
 
-            event_type = parsed.get("type") if isinstance(parsed, dict) else None
-            normalized_event_type = str(event_type or "").upper()
 
-            if normalized_event_type in {"RUN_ERROR", "ERROR"}:
-                yield {"type": "error", "error": parsed.get("message") or parsed.get("error")}
-                return
+async def _persist_coding_round(
+    session: InterviewSessionModel,
+    round_state: CodingInterviewRoundModel,
+    current_user: UserModel,
+) -> InterviewSessionModel:
+    updated = await repo.update_interview_session(
+        InterviewSessionModel(
+            id=session.id,
+            user_id=session.user_id,
+            coding_round=round_state,
+        ),
+        current_user.id,
+    )
+    if updated is None:
+        raise fastapi.HTTPException(status_code=500, detail="Unable to update coding round")
+    return updated
 
-            if normalized_event_type in {"RUN_FINISHED", "RUN_COMPLETED", "DONE", "COMPLETE", "END"}:
-                yield {"type": "done"}
-                return
 
-            if normalized_event_type in {"DELTA", "TEXT_MESSAGE_CONTENT"}:
-                delta_text = parsed.get("delta")
-                if isinstance(delta_text, str) and delta_text:
-                    yield {"type": "delta", "delta": delta_text}
-                continue
+async def _finalize_completed_session(
+    session: InterviewSessionModel,
+    current_user: UserModel,
+    *,
+    transcript_entry: str | None = None,
+) -> InterviewSessionModel:
+    score, report = await _generate_ai_report(session, session.answers)
 
-            if normalized_event_type == "START":
-                continue
-
-            if normalized_event_type:
-                continue
-
-            delta_text = _extract_text(parsed)
-            if delta_text:
-                yield {"type": "delta", "delta": delta_text}
-            continue
-
-        if line.startswith(":"):
-            continue
-
-        if line.startswith("data:"):
-            pending_data_lines.append(line[5:].lstrip())
-
-    trailing = _flush_event_data(pending_data_lines)
-    if trailing:
-        try:
-            parsed = json.loads(trailing)
-        except json.JSONDecodeError:
-            logger.debug("[trace=%s] dropped malformed trailing sse chunk", trace_id)
-            return
-
-        event_type = parsed.get("type") if isinstance(parsed, dict) else None
-        normalized_event_type = str(event_type or "").upper()
-        if normalized_event_type in {"DELTA", "TEXT_MESSAGE_CONTENT"}:
-            delta_text = parsed.get("delta")
-            if isinstance(delta_text, str) and delta_text:
-                yield {"type": "delta", "delta": delta_text}
-        elif normalized_event_type in {"RUN_ERROR", "ERROR"}:
-            yield {"type": "error", "error": parsed.get("message") or parsed.get("error")}
-        elif normalized_event_type in {"RUN_FINISHED", "RUN_COMPLETED", "DONE", "COMPLETE", "END"}:
-            yield {"type": "done"}
+    updated = await repo.update_interview_session(
+        InterviewSessionModel(
+            id=session.id,
+            user_id=session.user_id,
+            current_question_index=len(session.questions),
+            score=score,
+            report=report,
+            is_completed=True,
+            completed_at=utcnow(),
+            transcript=transcript_entry,
+            coding_round=(
+                session.coding_round.model_copy(update={"completed_at": utcnow()})
+                if session.coding_round and session.coding_round.completed_at is None
+                else session.coding_round
+            ),
+        ),
+        current_user.id,
+    )
+    if updated is None:
+        raise fastapi.HTTPException(status_code=500, detail="Unable to finalize interview")
+    return updated
 
 
 def _get_markitdown():
@@ -1006,11 +984,6 @@ async def logout(token: str = fastapi.Depends(_get_bearer_token)):
     return {"ok": True}
 
 
-@app.post("/api/session/new", response_model=StartSessionResponse)
-async def start_session() -> StartSessionResponse:
-    return StartSessionResponse(sessionId=str(uuid.uuid4()), systemPrompt=SYSTEM_PROMPT)
-
-
 @app.post("/api/interviews/parse-document", response_model=ParsedDocumentResponse)
 async def parse_document(
     file: fastapi.UploadFile = fastapi.File(...),
@@ -1027,15 +1000,20 @@ async def create_interview(
     resume_text = payload.resume_text.strip()
     job_description_text = payload.job_description_text.strip()
 
-    generated = await _generate_ai_questions(resume_text, job_description_text, payload.interview_length)
-    if generated is None:
-        role_title, questions = _generate_fallback_questions(
-            resume_text,
-            job_description_text,
-            payload.interview_length,
-        )
-    else:
-        role_title, questions = generated
+    role_title, questions = await _generate_ai_questions(
+        resume_text,
+        job_description_text,
+        payload.interview_length,
+    )
+
+    coding_round = await _build_coding_round(
+        target_company=payload.target_company,
+        difficulty=payload.coding_difficulty,
+        interviewer_mode=payload.interviewer_mode,
+        preferred_language=payload.preferred_language,
+        role_title=role_title,
+        job_description_text=job_description_text,
+    )
 
     record = InterviewSessionModel(
         user_id=current_user.id,
@@ -1043,9 +1021,11 @@ async def create_interview(
         job_description_text=job_description_text,
         interview_length=payload.interview_length,
         role_title=role_title,
+        target_company=(payload.target_company or "").strip() or None,
         questions=questions,
         answers=[],
         current_question_index=0,
+        coding_round=coding_round,
         is_completed=False,
     )
     return await repo.add_interview_session(record)
@@ -1082,9 +1062,7 @@ async def submit_interview_answer(
     if not session.questions:
         raise fastapi.HTTPException(status_code=400, detail="Interview has no questions")
     if session.current_question_index >= len(session.questions):
-        raise fastapi.HTTPException(status_code=400, detail="Interview has no remaining questions")
-    if session.current_question_index == len(session.questions) - 1:
-        raise fastapi.HTTPException(status_code=400, detail="Use the finish endpoint for the final question")
+        raise fastapi.HTTPException(status_code=400, detail="The question stage is already complete")
 
     current_question = session.questions[session.current_question_index]
     answer = InterviewAnswerModel(
@@ -1110,10 +1088,175 @@ async def submit_interview_answer(
     return updated
 
 
+@app.post("/api/interviews/{session_id}/skip", response_model=InterviewSessionModel)
+async def skip_interview_question(
+    session_id: UUID,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
+    session = await repo.get_interview_session(session_id, current_user.id)
+    if session is None:
+        raise fastapi.HTTPException(status_code=404, detail="Interview not found")
+    if session.is_completed:
+        raise fastapi.HTTPException(status_code=400, detail="Interview is already completed")
+    if not session.questions:
+        raise fastapi.HTTPException(status_code=400, detail="Interview has no questions")
+    if session.current_question_index >= len(session.questions):
+        raise fastapi.HTTPException(status_code=400, detail="The question stage is already complete")
+
+    current_question = session.questions[session.current_question_index]
+    skipped_answer = InterviewAnswerModel(
+        question_id=current_question.id,
+        question_order=current_question.order,
+        category=current_question.category,
+        question_prompt=current_question.prompt,
+        answer_text="[Skipped by candidate]",
+    )
+
+    updated = await repo.update_interview_session(
+        InterviewSessionModel(
+            id=session.id,
+            user_id=session.user_id,
+            answers=[*session.answers, skipped_answer],
+            current_question_index=session.current_question_index + 1,
+            transcript=_session_transcript_entry(current_question, skipped_answer.answer_text),
+        ),
+        current_user.id,
+    )
+    if updated is None:
+        raise fastapi.HTTPException(status_code=500, detail="Unable to skip interview question")
+
+    if updated.current_question_index < len(updated.questions) or updated.coding_round is not None:
+        return updated
+    return await _finalize_completed_session(updated, current_user)
+
+
+@app.post("/api/interviews/{session_id}/coding/events", response_model=InterviewSessionModel)
+async def append_coding_event(
+    session_id: UUID,
+    payload: CodingEventRequest,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
+    session = await repo.get_interview_session(session_id, current_user.id)
+    if session is None:
+        raise fastapi.HTTPException(status_code=404, detail="Interview not found")
+    if session.coding_round is None:
+        raise fastapi.HTTPException(status_code=400, detail="Coding round is not enabled for this interview")
+    if session.is_completed:
+        raise fastapi.HTTPException(status_code=400, detail="Interview is already completed")
+
+    updated_round = _append_coding_round_state(
+        session.coding_round,
+        event=payload.event,
+        code=payload.code,
+        language=payload.language,
+        transcript_append=payload.transcript_append,
+    )
+    return await _persist_coding_round(session, updated_round, current_user)
+
+
+@app.post("/api/interviews/{session_id}/coding/realtime/session", response_model=CodingRealtimeSessionResponse)
+async def create_coding_realtime_session(
+    session_id: UUID,
+    payload: CodingRealtimeSessionRequest,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
+    session = await repo.get_interview_session(session_id, current_user.id)
+    if session is None:
+        raise fastapi.HTTPException(status_code=404, detail="Interview not found")
+    if session.coding_round is None or session.coding_round.problem is None:
+        raise fastapi.HTTPException(status_code=400, detail="Coding round is not enabled for this interview")
+    if session.is_completed:
+        raise fastapi.HTTPException(status_code=400, detail="Interview is already completed")
+
+    selected_voice = (payload.voice or os.getenv("OPENAI_REALTIME_VOICE") or "marin").strip() or "marin"
+    sdp_answer = await _create_realtime_call(
+        sdp_offer=payload.sdp,
+        voice=selected_voice,
+        current_user=current_user,
+    )
+    return CodingRealtimeSessionResponse(
+        sdp=sdp_answer,
+        model=get_realtime_model(),
+        voice=selected_voice,
+        transcription_model=get_realtime_transcription_model(),
+    )
+
+
+@app.post("/api/interviews/{session_id}/coding/intervention", response_model=CodingInterventionResponse)
+async def decide_coding_intervention(
+    session_id: UUID,
+    payload: CodingInterventionRequest,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
+    session = await repo.get_interview_session(session_id, current_user.id)
+    if session is None:
+        raise fastapi.HTTPException(status_code=404, detail="Interview not found")
+    if session.coding_round is None or session.coding_round.problem is None:
+        raise fastapi.HTTPException(status_code=400, detail="Coding round is not enabled for this interview")
+    if payload.problem_id != session.coding_round.problem.id:
+        raise fastapi.HTTPException(status_code=400, detail="Problem mismatch for coding round")
+
+    working_round = _append_coding_round_state(
+        session.coding_round,
+        code=payload.code,
+        language=payload.language,
+        transcript_append=payload.transcript_recent,
+    )
+    if payload.recent_events:
+        for event in payload.recent_events:
+            working_round = _append_coding_round_state(working_round, event=event)
+            if event.type in {"candidate_spoke", "clarification_asked", "solution_explained"} and event.transcript_excerpt:
+                working_round = _append_coding_conversation_turn(
+                    working_round,
+                    role="candidate",
+                    content=event.transcript_excerpt,
+                    source_event_type=event.type,
+                )
+
+    decision = intervention_engine.decide(
+        round_state=working_round,
+        transcript_recent=payload.transcript_recent,
+        recent_events=payload.recent_events,
+        elapsed_time_seconds=payload.elapsed_time_seconds,
+        code=payload.code,
+    )
+
+    reply = await _generate_coding_interviewer_reply(
+        round_state=working_round,
+        recent_events=payload.recent_events,
+        transcript_recent=payload.transcript_recent,
+        code=payload.code,
+        decision=decision,
+    )
+
+    persisted_round = apply_intervention(working_round, decision)
+    if reply:
+        source_event_type = payload.recent_events[-1].type if payload.recent_events else None
+        reply_kind = "intervention" if decision.should_interrupt else "reply"
+        persisted_round = _append_coding_conversation_turn(
+            persisted_round,
+            role="interviewer",
+            content=reply,
+            kind=reply_kind,
+            source_event_type=source_event_type,
+            severity=decision.severity if decision.should_interrupt else None,
+        )
+    updated_session = await _persist_coding_round(session, persisted_round, current_user)
+
+    return CodingInterventionResponse(
+        should_interrupt=decision.should_interrupt,
+        reason=decision.reason,
+        question=decision.question,
+        severity=decision.severity,
+        reply=reply,
+        coding_round=updated_session.coding_round,
+    )
+
+
 @app.post("/api/interviews/{session_id}/finish", response_model=InterviewSessionModel)
 async def finish_interview(
     session_id: UUID,
-    payload: InterviewAnswerRequest,
+    payload: InterviewFinishRequest,
     current_user: UserModel = fastapi.Depends(_get_current_user),
 ):
     session = await repo.get_interview_session(session_id, current_user.id)
@@ -1123,47 +1266,54 @@ async def finish_interview(
         return session
     if not session.questions:
         raise fastapi.HTTPException(status_code=400, detail="Interview has no questions")
-    if session.current_question_index != len(session.questions) - 1:
-        raise fastapi.HTTPException(status_code=400, detail="Finish is only available on the last question")
 
-    current_question = session.questions[session.current_question_index]
-    final_answer = InterviewAnswerModel(
-        question_id=current_question.id,
-        question_order=current_question.order,
-        category=current_question.category,
-        question_prompt=current_question.prompt,
-        answer_text=payload.answer_text.strip(),
-    )
-    completed_answers = [*session.answers, final_answer]
+    if session.current_question_index < len(session.questions):
+        answer_text = (payload.answer_text or "").strip()
+        if not answer_text:
+            raise fastapi.HTTPException(status_code=400, detail="Answer text is required for the active question")
 
-    generated_report = await _generate_ai_report(session, completed_answers)
-    if generated_report is None:
-        score, report = _build_fallback_report(
-            session.role_title or _extract_role_title(session.job_description_text or ""),
-            session.resume_text or "",
-            session.job_description_text or "",
-            completed_answers,
+        current_question = session.questions[session.current_question_index]
+        final_answer = InterviewAnswerModel(
+            question_id=current_question.id,
+            question_order=current_question.order,
+            category=current_question.category,
+            question_prompt=current_question.prompt,
+            answer_text=answer_text,
         )
-    else:
-        score, report = generated_report
+        updated = await repo.update_interview_session(
+            InterviewSessionModel(
+                id=session.id,
+                user_id=session.user_id,
+                answers=[*session.answers, final_answer],
+                current_question_index=session.current_question_index + 1,
+                transcript=_session_transcript_entry(current_question, final_answer.answer_text),
+            ),
+            current_user.id,
+        )
+        if updated is None:
+            raise fastapi.HTTPException(status_code=500, detail="Unable to advance the interview")
+        if updated.current_question_index < len(updated.questions) or updated.coding_round is not None:
+            return updated
+        return await _finalize_completed_session(updated, current_user)
 
-    updated = await repo.update_interview_session(
-        InterviewSessionModel(
-            id=session.id,
-            user_id=session.user_id,
-            answers=completed_answers,
-            current_question_index=len(session.questions),
-            score=score,
-            report=report,
-            is_completed=True,
-            completed_at=utcnow(),
-            transcript=_session_transcript_entry(current_question, final_answer.answer_text),
-        ),
-        current_user.id,
-    )
-    if updated is None:
-        raise fastapi.HTTPException(status_code=500, detail="Unable to finalize interview")
-    return updated
+    active_coding_round = session.coding_round
+    if active_coding_round is not None:
+        completed_round = _append_coding_round_state(
+            active_coding_round,
+            code=payload.code,
+            language=payload.language,
+            transcript_append=payload.transcript_recent,
+        )
+        evaluation = await _generate_ai_coding_evaluation(completed_round)
+        finalized_round = completed_round.model_copy(
+            update={
+                "evaluation": evaluation,
+                "completed_at": utcnow(),
+            }
+        )
+        session = session.model_copy(update={"coding_round": finalized_round})
+
+    return await _finalize_completed_session(session, current_user)
 
 
 @app.delete("/api/interviews/{session_id}")
@@ -1190,7 +1340,7 @@ async def get_question_hint(
 
     question = session.questions[session.current_question_index]
     content = await _generate_ai_help("hint", session, question)
-    return InterviewHelpResponse(question_id=question.id, content=content or _build_hint(question, session))
+    return InterviewHelpResponse(question_id=question.id, content=content)
 
 
 @app.post("/api/interviews/{session_id}/model-answer", response_model=InterviewHelpResponse)
@@ -1206,10 +1356,7 @@ async def get_question_model_answer(
 
     question = session.questions[session.current_question_index]
     content = await _generate_ai_help("model_answer", session, question)
-    return InterviewHelpResponse(
-        question_id=question.id,
-        content=content or _build_model_answer(question, session),
-    )
+    return InterviewHelpResponse(question_id=question.id, content=content)
 
 
 @app.get("/api/interview-data/sessions/{session_id}", response_model=InterviewSessionModel)
@@ -1313,111 +1460,6 @@ async def get_uploaded_file(file_id: str, file_name: str):
             "Content-Disposition": response.headers.get("Content-Disposition", f'inline; filename="{file_name}"'),
         },
     )
-
-
-@app.post("/api/chat/stream")
-async def stream_chat(payload: ChatStreamRequest):
-    trace_id = uuid.uuid4().hex[:12]
-    replay_history = [
-        message.model_dump()
-        for message in payload.history
-        if message.role in {"system", "user", "assistant"}
-    ]
-
-    agent_payload = {
-        "session_id": payload.sessionId,
-        "messages": replay_history + [{"role": "user", "content": payload.message}],
-        "message": payload.message,
-        "history": replay_history,
-    }
-
-    async def event_generator() -> AsyncIterator[str]:
-        yield _to_sse({"type": "start", "traceId": trace_id})
-        done_emitted = False
-
-        try:
-            async with httpx.AsyncClient(timeout=None) as client:
-                async with client.stream(
-                    "POST",
-                    f"{get_agent_base_url()}/chat/stream",
-                    json=agent_payload,
-                    headers={"accept": "text/event-stream", "x-trace-id": trace_id},
-                ) as response:
-                    response.raise_for_status()
-                    async for event in _read_agent_stream(response, trace_id=trace_id):
-                        if event.get("type") == "error":
-                            err = event.get("error") or "Agent stream failed"
-                            logger.warning("[trace=%s] agent stream error=%s", trace_id, _truncate(err))
-                            yield _to_sse({"type": "error", "error": err, "traceId": trace_id})
-                            return
-                        if event.get("type") == "done":
-                            if not done_emitted:
-                                yield _to_sse({"type": "done"})
-                                done_emitted = True
-                            continue
-                        yield _to_sse(event)
-        except httpx.HTTPStatusError as exc:
-            detail = exc.response.text or "Agent stream request failed"
-            logger.warning("[trace=%s] agent stream status error=%s", trace_id, _truncate(detail))
-            yield _to_sse({"type": "error", "error": detail, "traceId": trace_id})
-            return
-        except httpx.HTTPError:
-            logger.warning("[trace=%s] agent service unavailable", trace_id)
-            yield _to_sse({"type": "error", "error": "Agent service unavailable", "traceId": trace_id})
-            return
-
-        if not done_emitted:
-            yield _to_sse({"type": "done"})
-
-    return fastapi.responses.StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
-@app.post("/api/voice/session")
-async def create_voice_session(payload: VoiceSessionRequest):
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
-        raise fastapi.HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured")
-
-    trace_id = uuid.uuid4().hex[:12]
-    instructions = payload.instructions or (
-        "You are an interview coach voice agent. "
-        "Keep replies concise and practical. "
-        "Ask one interview question at a time and provide coaching feedback."
-    )
-
-    session_request = {
-        "model": payload.model,
-        "voice": payload.voice,
-        "modalities": ["audio", "text"],
-        "instructions": instructions,
-    }
-
-    realtime_url = f"{get_openai_base_url()}/realtime/sessions"
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                realtime_url,
-                json=session_request,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "OpenAI-Beta": "realtime=v1",
-                    "x-trace-id": trace_id,
-                },
-            )
-            response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        detail = exc.response.text or "Failed to create voice session"
-        logger.warning("[trace=%s] voice session status error=%s", trace_id, _truncate(detail))
-        raise fastapi.HTTPException(status_code=exc.response.status_code, detail=detail) from exc
-    except httpx.HTTPError as exc:
-        logger.warning("[trace=%s] voice session unavailable", trace_id)
-        raise fastapi.HTTPException(status_code=502, detail="OpenAI Realtime unavailable") from exc
-    except Exception as exc:
-        logger.exception("[trace=%s] unexpected error creating voice session", trace_id)
-        raise fastapi.HTTPException(status_code=500, detail="Unexpected error creating voice session") from exc
-
-    return response.json()
 
 
 if not os.path.exists("static"):

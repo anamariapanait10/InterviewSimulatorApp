@@ -12,7 +12,8 @@ export default function HomePage() {
         <h1>Run full mock interviews and get instant detailed feedback.</h1>
         <p className="support-copy">
           Upload or paste your CV and target job description, pick the interview length, answer one
-          question at a time, and finish with a scored performance report!
+          question at a time, move into a live coding round with an AI interviewer, and finish with
+          a scored performance report.
         </p>
         <div className="hero-actions">
           {isAuthenticated ? (
@@ -51,7 +52,8 @@ export default function HomePage() {
           <h2>Simulate real interviews</h2>
           <p className="mt-2">
             Answer one question at a time in a guided, realistic flow. The AI adapts dynamically,
-            challenging you with behavioral and technical prompts based on your responses.
+            challenging you with behavioral and technical prompts, then stepping into a realistic
+            coding interview with short live follow-ups.
           </p>
         </article>
 

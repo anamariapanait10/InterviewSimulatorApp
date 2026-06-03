@@ -35,6 +35,10 @@ export default function InterviewSummaryPanel({ session }: InterviewSummaryPanel
             <strong>{session.interview_length ?? 'custom'}</strong>
           </div>
           <div>
+            <span>Company</span>
+            <strong>{session.target_company ?? session.coding_round?.matched_company ?? 'General bank'}</strong>
+          </div>
+          <div>
             <span>Questions</span>
             <strong>{session.questions.length}</strong>
           </div>
@@ -84,10 +88,36 @@ export default function InterviewSummaryPanel({ session }: InterviewSummaryPanel
           </section>
           <section>
             <h2>Recommendation</h2>
-            <p>{session.report.recommendation}</p>
+            <p>{session.report.hire_recommendation || session.report.recommendation}</p>
           </section>
         </div>
       </article>
+
+      {session.report.coding_evaluation && (
+        <article className="flow-card">
+          <p className="section-eyebrow">Coding Evaluation</p>
+          <div className="summary-columns">
+            <section>
+              <h2>Scorecard</h2>
+              <div className="score-list">
+                <p>Communication: {session.report.coding_evaluation.communication}/10</p>
+                <p>Problem solving: {session.report.coding_evaluation.problem_solving}/10</p>
+                <p>Coding: {session.report.coding_evaluation.coding}/10</p>
+                <p>Complexity analysis: {session.report.coding_evaluation.complexity_analysis}/10</p>
+                <p>Debugging: {session.report.coding_evaluation.debugging}/10</p>
+                <p>Edge cases: {session.report.coding_evaluation.edge_cases}/10</p>
+              </div>
+            </section>
+            <section>
+              <h2>Outcome</h2>
+              <p>{session.report.coding_feedback}</p>
+              <p className="review-feedback">
+                Hire recommendation: {session.report.coding_evaluation.hire_recommendation}
+              </p>
+            </section>
+          </div>
+        </article>
+      )}
 
       <article className="flow-card">
         <p className="section-eyebrow">Question Review</p>
@@ -109,6 +139,34 @@ export default function InterviewSummaryPanel({ session }: InterviewSummaryPanel
           })}
         </div>
       </article>
+
+      {session.coding_round?.problem && (
+        <article className="flow-card">
+          <p className="section-eyebrow">Coding Round Details</p>
+          <h2>{session.coding_round.problem.title}</h2>
+          <p className="support-copy">{session.coding_round.problem.prompt}</p>
+          {session.coding_round.evaluation && (
+            <div className="summary-columns mt-2">
+              <section>
+                <h3>Strengths</h3>
+                <ul className="detail-list">
+                  {session.coding_round.evaluation.strengths.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </section>
+              <section>
+                <h3>Concerns</h3>
+                <ul className="detail-list">
+                  {session.coding_round.evaluation.concerns.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </section>
+            </div>
+          )}
+        </article>
+      )}
     </section>
   )
 }
