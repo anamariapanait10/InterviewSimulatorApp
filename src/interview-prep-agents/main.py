@@ -25,6 +25,8 @@ class InterviewPlanRequest(BaseModel):
     interview_length: str = Field(min_length=1)
     behavioral_count: int = Field(ge=1, le=12)
     technical_count: int = Field(ge=1, le=12)
+    company_name: str | None = None
+    company_context: str | None = None
 
 
 class InterviewPlanResponse(BaseModel):
@@ -54,6 +56,8 @@ class InterviewReportRequest(BaseModel):
     role_title: str = Field(min_length=1)
     questions: list[InterviewPlanQuestion] = Field(default_factory=list)
     answers: list[InterviewAnswerPayload] = Field(default_factory=list)
+    company_name: str | None = None
+    company_context: str | None = None
     coding_feedback_input: str | None = None
     coding_hire_recommendation: str | None = None
 
@@ -78,6 +82,8 @@ class InterviewHelpRequest(BaseModel):
     question: InterviewPlanQuestion
     resume_text: str = Field(min_length=1)
     job_description_text: str = Field(min_length=1)
+    company_name: str | None = None
+    company_context: str | None = None
 
 
 class InterviewHelpResponse(BaseModel):
@@ -149,6 +155,8 @@ async def build_interview_plan(payload: InterviewPlanRequest):
         interview_length=payload.interview_length,
         behavioral_count=payload.behavioral_count,
         technical_count=payload.technical_count,
+        company_name=payload.company_name,
+        company_context=payload.company_context,
     )
     return InterviewPlanResponse.model_validate(parsed)
 
@@ -162,6 +170,8 @@ async def build_interview_report(payload: InterviewReportRequest):
         job_description_text=payload.job_description_text,
         questions=[item.model_dump(mode="json") for item in payload.questions],
         answers=[item.model_dump(mode="json") for item in payload.answers],
+        company_name=payload.company_name,
+        company_context=payload.company_context,
         coding_feedback_input=payload.coding_feedback_input,
         coding_hire_recommendation=payload.coding_hire_recommendation,
     )
@@ -176,6 +186,8 @@ async def build_interview_help(payload: InterviewHelpRequest):
         question=payload.question.model_dump(mode="json"),
         resume_text=payload.resume_text,
         job_description_text=payload.job_description_text,
+        company_name=payload.company_name,
+        company_context=payload.company_context,
     )
     return InterviewHelpResponse.model_validate(parsed)
 

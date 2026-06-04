@@ -2,10 +2,13 @@ import { clearStoredAuthToken, getStoredAuthToken } from './authStorage'
 import type {
   AuthResponse,
   CodingInterventionResponse,
+  Company,
+  CompanyKnowledgeSource,
   InterviewHelpResponse,
   InterviewHistoryItem,
   InterviewSession,
   ParsedDocumentResponse,
+  RagSearchResult,
   User,
 } from './types'
 
@@ -105,6 +108,7 @@ export async function createInterview(payload: {
   job_description_text: string
   interview_length: 'short' | 'medium' | 'long'
   target_company?: string
+  company_id?: string | null
   coding_difficulty: 'easy' | 'medium' | 'hard'
   interviewer_mode: 'warm' | 'neutral' | 'bar_raiser' | 'silent'
   preferred_language: 'typescript' | 'javascript' | 'python' | 'java' | 'csharp'
@@ -160,6 +164,21 @@ export async function skipInterviewQuestion(sessionId: string): Promise<Intervie
   })
 
   return parseJson<InterviewSession>(response)
+}
+
+export async function recordPracticeDuration(
+  sessionId: string,
+  seconds: number,
+  options?: { keepalive?: boolean },
+): Promise<void> {
+  const response = await fetch(`/api/interviews/${sessionId}/practice-duration`, {
+    method: 'POST',
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ seconds }),
+    keepalive: options?.keepalive ?? false,
+  })
+
+  await parseJson<InterviewSession>(response)
 }
 
 export async function finishInterview(
@@ -264,4 +283,133 @@ export async function createCodingRealtimeSession(
     body: JSON.stringify(payload),
   })
   return parseJson(response)
+}
+
+
+export async function listCompanies(): Promise<Company[]> {
+  const response = await fetch('/api/companies', {
+    headers: withAuthHeaders(),
+  })
+  return parseJson<Company[]>(response)
+}
+
+export async function createCompany(payload: {
+  name: string
+  description?: string
+  website?: string
+}): Promise<Company> {
+  const response = await fetch('/api/companies', {
+    method: 'POST',
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload),
+  })
+  return parseJson<Company>(response)
+}
+
+export async function getCompany(companyId: string): Promise<Company> {
+  const response = await fetch(`/api/companies/${companyId}`, {
+    headers: withAuthHeaders(),
+  })
+  return parseJson<Company>(response)
+}
+
+export async function listCompanyKnowledge(companyId: string): Promise<CompanyKnowledgeSource[]> {
+  const response = await fetch(`/api/companies/${companyId}/knowledge`, {
+    headers: withAuthHeaders(),
+  })
+  return parseJson<CompanyKnowledgeSource[]>(response)
+}
+
+export async function addCompanyKnowledgeText(
+  companyId: string,
+  payload: {
+    title: string
+    content: string
+    source_type: 'manual' | 'official_page' | 'job_description' | 'engineering_blog' | 'interview_guide'
+    metadata: {
+      role?: string | null
+      category?: string | null
+      url?: string | null
+    }
+  },
+): Promise<CompanyKnowledgeSource> {
+  const response = await fetch(`/api/companies/${companyId}/knowledge/text`, {
+    method: 'POST',
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload),
+  })
+  return parseJson<CompanyKnowledgeSource>(response)
+}
+
+export async function uploadCompanyKnowledge(
+  companyId: string,
+  payload: {
+    file: File
+    title?: string
+    source_type: 'manual' | 'official_page' | 'job_description' | 'engineering_blog' | 'interview_guide'
+    metadata?: {
+      role?: string | null
+      category?: string | null
+      url?: string | null
+    }
+  },
+): Promise<CompanyKnowledgeSource> {
+  const formData = new FormData()
+  formData.append('file', payload.file)
+  formData.append('source_type', payload.source_type)
+  if (payload.title) {
+    formData.append('title', payload.title)
+  }
+  if (payload.metadata) {
+    formData.append('metadata_json', JSON.stringify(payload.metadata))
+  }
+
+  const response = await fetch(`/api/companies/${companyId}/knowledge/upload`, {
+    method: 'POST',
+    headers: withAuthHeaders(),
+    body: formData,
+  })
+  return parseJson<CompanyKnowledgeSource>(response)
+}
+
+export async function updateCompanyKnowledge(
+  companyId: string,
+  sourceId: string,
+  payload: {
+    title: string
+    content: string
+    source_type: 'manual' | 'official_page' | 'job_description' | 'engineering_blog' | 'interview_guide'
+    metadata: {
+      role?: string | null
+      category?: string | null
+      url?: string | null
+    }
+  },
+): Promise<CompanyKnowledgeSource> {
+  const response = await fetch(`/api/companies/${companyId}/knowledge/${sourceId}`, {
+    method: 'PUT',
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload),
+  })
+  return parseJson<CompanyKnowledgeSource>(response)
+}
+
+export async function deleteCompanyKnowledge(companyId: string, sourceId: string): Promise<void> {
+  const response = await fetch(`/api/companies/${companyId}/knowledge/${sourceId}`, {
+    method: 'DELETE',
+    headers: withAuthHeaders(),
+  })
+  await parseJson<{ ok: boolean }>(response)
+}
+
+export async function searchCompanyKnowledge(
+  companyId: string,
+  payload: { query: string; top_k?: number },
+): Promise<RagSearchResult[]> {
+  const response = await fetch(`/api/companies/${companyId}/rag/search`, {
+    method: 'POST',
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload),
+  })
+  return parseJson<RagSearchResult[]>(response)
 }

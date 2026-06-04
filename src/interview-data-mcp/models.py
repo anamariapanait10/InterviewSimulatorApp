@@ -11,6 +11,8 @@ def utcnow() -> datetime:
 
 class InterviewSessionModel(BaseModel):
     id: UUID = Field(default_factory=uuid4)
+    company_id: UUID | None = None
+    company_name: str | None = None
     resume_link: str | None = None
     resume_text: str | None = None
     proceed_without_resume: bool = False
@@ -21,3 +23,11 @@ class InterviewSessionModel(BaseModel):
     is_completed: bool = False
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+class CompanyModel(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    name: str
+    description: str | None = None
+    website: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+

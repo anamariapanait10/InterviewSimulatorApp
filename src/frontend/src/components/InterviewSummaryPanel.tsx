@@ -4,6 +4,21 @@ interface InterviewSummaryPanelProps {
   session: InterviewSession
 }
 
+function formatDuration(totalSeconds: number | null): string {
+  if (totalSeconds === null || totalSeconds <= 0) {
+    return 'Not recorded'
+  }
+
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`
+  }
+
+  return `${minutes}m`
+}
+
 export default function InterviewSummaryPanel({ session }: InterviewSummaryPanelProps) {
   if (!session.report) {
     return (
@@ -39,8 +54,8 @@ export default function InterviewSummaryPanel({ session }: InterviewSummaryPanel
             <strong>{session.target_company ?? session.coding_round?.matched_company ?? 'General bank'}</strong>
           </div>
           <div>
-            <span>Questions</span>
-            <strong>{session.questions.length}</strong>
+            <span>Practice Time</span>
+            <strong>{formatDuration(session.practice_duration_seconds)}</strong>
           </div>
           <div>
             <span>Completed</span>

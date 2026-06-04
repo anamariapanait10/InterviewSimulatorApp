@@ -32,6 +32,12 @@ export default function App() {
           >
             History
           </NavLink>
+          <NavLink
+            to="/companies"
+            className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+          >
+            Companies
+          </NavLink>
         </nav>
 
         <div className="auth-nav">

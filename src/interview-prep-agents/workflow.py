@@ -66,6 +66,8 @@ async def build_interview_plan_with_agent(
     interview_length: str,
     behavioral_count: int,
     technical_count: int,
+    company_name: str | None = None,
+    company_context: str | None = None,
 ) -> dict[str, Any]:
     prompt = f"""
 Create a complete interview plan as strict JSON.
@@ -73,12 +75,16 @@ Create a complete interview plan as strict JSON.
 Interview length: {interview_length}
 Behavioral questions required: {behavioral_count}
 Technical questions required: {technical_count}
+Target company: {company_name or "not specified"}
 
 Resume:
 {resume_text}
 
 Job description:
 {job_description_text}
+
+Company-specific knowledge:
+{company_context or "No additional company knowledge provided."}
 
 Return JSON with this exact shape:
 {{
@@ -116,6 +122,8 @@ async def build_interview_report_with_agent(
     job_description_text: str,
     questions: list[dict[str, Any]],
     answers: list[dict[str, Any]],
+    company_name: str | None = None,
+    company_context: str | None = None,
     coding_feedback_input: str | None = None,
     coding_hire_recommendation: str | None = None,
 ) -> dict[str, Any]:
@@ -132,12 +140,16 @@ Evaluate the completed interview and return strict JSON only.
 
 Role title: {role_title}
 Interview length: {interview_length}
+Target company: {company_name or "not specified"}
 
 Resume:
 {resume_text}
 
 Job description:
 {job_description_text}
+
+Company-specific knowledge:
+{company_context or "No additional company knowledge provided."}
 
 Questions:
 {json.dumps(questions, ensure_ascii=True, indent=2)}
@@ -189,6 +201,8 @@ async def build_interview_help_with_agent(
     question: dict[str, Any],
     resume_text: str,
     job_description_text: str,
+    company_name: str | None = None,
+    company_context: str | None = None,
 ) -> dict[str, Any]:
     intent_line = (
         "Provide a short hint that points the user in the right direction without giving the full answer."
@@ -201,6 +215,7 @@ You are helping a user answer an interview question.
 
 Role title: {role_title}
 Question category: {question.get("category", "")}
+Target company: {company_name or "not specified"}
 Question:
 {question.get("prompt", "")}
 
@@ -209,6 +224,9 @@ Resume:
 
 Job description:
 {job_description_text}
+
+Company-specific knowledge:
+{company_context or "No additional company knowledge provided."}
 
 Task:
 {intent_line}

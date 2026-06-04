@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import CodingInterviewStage from '../components/CodingInterviewStage'
@@ -6,11 +6,14 @@ import {
   getInterview,
   getInterviewHint,
   getInterviewModelAnswer,
+  recordPracticeDuration,
   skipInterviewQuestion,
   submitInterviewAnswer,
 } from '../api'
 import type { InterviewSession } from '../types'
 import './InterviewFlow.css'
+
+const PRACTICE_FLUSH_INTERVAL_MS = 15000
 
 export default function InterviewRunPage() {
   const { sessionId = '' } = useParams()
@@ -24,6 +27,86 @@ export default function InterviewRunPage() {
   const [modelAnswer, setModelAnswer] = useState<string | null>(null)
   const [isLoadingHint, setIsLoadingHint] = useState(false)
   const [isLoadingModelAnswer, setIsLoadingModelAnswer] = useState(false)
+  const sessionRef = useRef<InterviewSession | null>(null)
+  const activeStartedAtRef = useRef<number | null>(null)
+  const pendingPracticeMsRef = useRef(0)
+
+  const captureElapsedPractice = () => {
+    if (activeStartedAtRef.current === null) {
+      return
+    }
+
+    const now = Date.now()
+    pendingPracticeMsRef.current += Math.max(now - activeStartedAtRef.current, 0)
+    activeStartedAtRef.current = now
+  }
+
+  const stopPracticeTracking = () => {
+    if (activeStartedAtRef.current === null) {
+      return
+    }
+
+    captureElapsedPractice()
+    activeStartedAtRef.current = null
+  }
+
+  const shouldTrackPractice = () => {
+    const currentSession = sessionRef.current
+    if (!currentSession || currentSession.is_completed) {
+      return false
+    }
+
+    return document.visibilityState === 'visible' && document.hasFocus()
+  }
+
+  const syncPracticeTrackingState = () => {
+    if (shouldTrackPractice()) {
+      if (activeStartedAtRef.current === null) {
+        activeStartedAtRef.current = Date.now()
+      }
+      return
+    }
+
+    stopPracticeTracking()
+  }
+
+  const flushPracticeDuration = async (options?: {
+    keepalive?: boolean
+    forceStop?: boolean
+  }) => {
+    if (options?.forceStop) {
+      stopPracticeTracking()
+    }
+
+    const currentSession = sessionRef.current
+    if (!currentSession || currentSession.is_completed) {
+      pendingPracticeMsRef.current = 0
+      return
+    }
+
+    const wholeSeconds = Math.floor(pendingPracticeMsRef.current / 1000)
+    if (wholeSeconds <= 0) {
+      return
+    }
+
+    pendingPracticeMsRef.current -= wholeSeconds * 1000
+
+    try {
+      await recordPracticeDuration(currentSession.id, wholeSeconds, {
+        keepalive: options?.keepalive,
+      })
+      setSession((previous) =>
+        previous && previous.id === currentSession.id
+          ? {
+              ...previous,
+              practice_duration_seconds: (previous.practice_duration_seconds ?? 0) + wholeSeconds,
+            }
+          : previous,
+      )
+    } catch {
+      pendingPracticeMsRef.current += wholeSeconds * 1000
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -64,6 +147,59 @@ export default function InterviewRunPage() {
     }
   }, [navigate, session])
 
+  useEffect(() => {
+    sessionRef.current = session
+    syncPracticeTrackingState()
+  }, [session])
+
+  useEffect(() => {
+    if (!session || session.is_completed) {
+      return
+    }
+
+    const handleVisibilityChange = () => {
+      syncPracticeTrackingState()
+      if (document.visibilityState !== 'visible') {
+        void flushPracticeDuration({ forceStop: true })
+      }
+    }
+
+    const handleWindowFocus = () => {
+      syncPracticeTrackingState()
+    }
+
+    const handleWindowBlur = () => {
+      syncPracticeTrackingState()
+      void flushPracticeDuration({ forceStop: true })
+    }
+
+    const handlePageHide = () => {
+      void flushPracticeDuration({ forceStop: true, keepalive: true })
+    }
+
+    const intervalId = window.setInterval(() => {
+      if (activeStartedAtRef.current !== null) {
+        captureElapsedPractice()
+      }
+      void flushPracticeDuration()
+    }, PRACTICE_FLUSH_INTERVAL_MS)
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('focus', handleWindowFocus)
+    window.addEventListener('blur', handleWindowBlur)
+    window.addEventListener('pagehide', handlePageHide)
+    syncPracticeTrackingState()
+
+    return () => {
+      window.clearInterval(intervalId)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('focus', handleWindowFocus)
+      window.removeEventListener('blur', handleWindowBlur)
+      window.removeEventListener('pagehide', handlePageHide)
+      void flushPracticeDuration({ forceStop: true, keepalive: true })
+    }
+  }, [session?.id, session?.is_completed])
+
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!session) {
@@ -80,6 +216,7 @@ export default function InterviewRunPage() {
     setIsSubmitting(true)
 
     try {
+      await flushPracticeDuration({ forceStop: true })
       const updated = await submitInterviewAnswer(session.id, trimmedAnswer)
       setSession(updated)
       setAnswer('')
@@ -134,6 +271,7 @@ export default function InterviewRunPage() {
     setError(null)
     setIsSubmitting(true)
     try {
+      await flushPracticeDuration({ forceStop: true })
       const updated = await skipInterviewQuestion(session.id)
       setSession(updated)
       setAnswer('')

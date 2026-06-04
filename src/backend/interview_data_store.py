@@ -140,6 +140,8 @@ class InterviewReportModel(BaseModel):
 class InterviewSessionModel(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     user_id: UUID | None = None
+    company_id: UUID | None = None
+    company_name: str | None = None
     resume_link: str | None = None
     resume_text: str | None = None
     proceed_without_resume: bool = False
@@ -157,6 +159,7 @@ class InterviewSessionModel(BaseModel):
     score: int | None = None
     report: InterviewReportModel | None = None
     is_completed: bool = False
+    practice_duration_seconds: int | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     completed_at: datetime | None = None
@@ -175,6 +178,8 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", "./interviewcoach.db")
 
 OPTIONAL_COLUMNS: dict[str, str] = {
     "user_id": "TEXT",
+    "company_id": "TEXT",
+    "company_name": "TEXT",
     "interview_length": "TEXT",
     "role_title": "TEXT",
     "target_company": "TEXT",
@@ -184,6 +189,7 @@ OPTIONAL_COLUMNS: dict[str, str] = {
     "coding_round_json": "TEXT",
     "score": "INTEGER",
     "report_json": "TEXT",
+    "practice_duration_seconds": "INTEGER NOT NULL DEFAULT 0",
     "completed_at": "TEXT",
 }
 
@@ -260,6 +266,8 @@ def _row_to_model(row: aiosqlite.Row) -> InterviewSessionModel:
     return InterviewSessionModel(
         id=UUID(row["id"]),
         user_id=UUID(row["user_id"]) if row["user_id"] else None,
+        company_id=UUID(row["company_id"]) if row["company_id"] else None,
+        company_name=row["company_name"],
         resume_link=row["resume_link"],
         resume_text=row["resume_text"],
         proceed_without_resume=bool(row["proceed_without_resume"]),
@@ -277,6 +285,7 @@ def _row_to_model(row: aiosqlite.Row) -> InterviewSessionModel:
         score=row["score"],
         report=_load_json_object(row["report_json"], InterviewReportModel),
         is_completed=bool(row["is_completed"]),
+        practice_duration_seconds=int(row["practice_duration_seconds"] or 0),
         created_at=created_at,
         updated_at=updated_at,
         completed_at=_parse_datetime(row["completed_at"]),
@@ -343,6 +352,8 @@ class InterviewSessionRepository:
                 CREATE TABLE IF NOT EXISTS InterviewSessions (
                     id TEXT PRIMARY KEY,
                     user_id TEXT,
+                    company_id TEXT,
+                    company_name TEXT,
                     resume_link TEXT,
                     resume_text TEXT,
                     proceed_without_resume INTEGER NOT NULL DEFAULT 0,
@@ -362,6 +373,7 @@ class InterviewSessionRepository:
                     coding_round_json TEXT,
                     score INTEGER,
                     report_json TEXT,
+                    practice_duration_seconds INTEGER NOT NULL DEFAULT 0,
                     completed_at TEXT
                 )
                 """
@@ -378,6 +390,8 @@ class InterviewSessionRepository:
                 INSERT OR IGNORE INTO InterviewSessions (
                     id,
                     user_id,
+                    company_id,
+                    company_name,
                     resume_link,
                     resume_text,
                     proceed_without_resume,
@@ -394,15 +408,18 @@ class InterviewSessionRepository:
                     coding_round_json,
                     score,
                     report_json,
+                    practice_duration_seconds,
                     is_completed,
                     created_at,
                     updated_at,
                     completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(record.id),
                     str(record.user_id) if record.user_id else None,
+                    str(record.company_id) if record.company_id else None,
+                    record.company_name,
                     record.resume_link,
                     record.resume_text,
                     int(record.proceed_without_resume),
@@ -419,6 +436,7 @@ class InterviewSessionRepository:
                     _serialize_coding_round(record.coding_round),
                     record.score,
                     _serialize_report(record.report),
+                    record.practice_duration_seconds or 0,
                     int(record.is_completed),
                     (record.created_at or now).isoformat(),
                     (record.updated_at or now).isoformat(),
@@ -519,6 +537,8 @@ class InterviewSessionRepository:
         updated_record = InterviewSessionModel(
             id=existing.id,
             user_id=pick("user_id"),
+            company_id=pick("company_id"),
+            company_name=pick("company_name"),
             resume_link=pick("resume_link"),
             resume_text=pick("resume_text"),
             proceed_without_resume=pick("proceed_without_resume"),
@@ -536,6 +556,7 @@ class InterviewSessionRepository:
             score=pick("score"),
             report=pick("report"),
             is_completed=pick("is_completed"),
+            practice_duration_seconds=pick("practice_duration_seconds"),
             created_at=existing.created_at,
             updated_at=utcnow(),
             completed_at=pick("completed_at"),
@@ -546,6 +567,8 @@ class InterviewSessionRepository:
                 """
                 UPDATE InterviewSessions
                 SET user_id = ?,
+                    company_id = ?,
+                    company_name = ?,
                     resume_link = ?,
                     resume_text = ?,
                     proceed_without_resume = ?,
@@ -562,6 +585,7 @@ class InterviewSessionRepository:
                     coding_round_json = ?,
                     score = ?,
                     report_json = ?,
+                    practice_duration_seconds = ?,
                     is_completed = ?,
                     updated_at = ?,
                     completed_at = ?
@@ -569,6 +593,8 @@ class InterviewSessionRepository:
                 """,
                 (
                     str(updated_record.user_id) if updated_record.user_id else None,
+                    str(updated_record.company_id) if updated_record.company_id else None,
+                    updated_record.company_name,
                     updated_record.resume_link,
                     updated_record.resume_text,
                     int(updated_record.proceed_without_resume),
@@ -585,6 +611,7 @@ class InterviewSessionRepository:
                     _serialize_coding_round(updated_record.coding_round),
                     updated_record.score,
                     _serialize_report(updated_record.report),
+                    updated_record.practice_duration_seconds or 0,
                     int(updated_record.is_completed),
                     updated_record.updated_at.isoformat(),
                     updated_record.completed_at.isoformat() if updated_record.completed_at else None,
@@ -651,6 +678,41 @@ class InterviewSessionRepository:
         if updated is None:
             raise RuntimeError("Failed to update interview session")
         return updated
+
+    async def increment_practice_duration(
+        self,
+        session_id: UUID,
+        seconds: int,
+        user_id: UUID | None = None,
+    ) -> InterviewSessionModel | None:
+        current = await self.get_interview_session(session_id, user_id)
+        if current is None:
+            return None
+
+        async with aiosqlite.connect(DATABASE_PATH) as conn:
+            if user_id is None:
+                await conn.execute(
+                    """
+                    UPDATE InterviewSessions
+                    SET practice_duration_seconds = COALESCE(practice_duration_seconds, 0) + ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (seconds, utcnow().isoformat(), str(session_id)),
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE InterviewSessions
+                    SET practice_duration_seconds = COALESCE(practice_duration_seconds, 0) + ?,
+                        updated_at = ?
+                    WHERE id = ? AND user_id = ?
+                    """,
+                    (seconds, utcnow().isoformat(), str(session_id), str(user_id)),
+                )
+            await conn.commit()
+
+        return await self.get_interview_session(session_id, user_id or current.user_id)
 
     async def delete_interview_session(self, session_id: UUID, user_id: UUID | None = None) -> bool:
         existing = await self.get_interview_session(session_id, user_id)

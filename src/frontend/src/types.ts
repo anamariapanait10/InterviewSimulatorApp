@@ -138,6 +138,8 @@ export interface InterviewReport {
 export interface InterviewSession {
   id: string
   user_id: string | null
+  company_id: string | null
+  company_name: string | null
   resume_text: string | null
   job_description_text: string | null
   interview_length: 'short' | 'medium' | 'long' | null
@@ -150,6 +152,7 @@ export interface InterviewSession {
   score: number | null
   report: InterviewReport | null
   is_completed: boolean
+  practice_duration_seconds: number | null
   created_at: string
   completed_at: string | null
 }
@@ -159,10 +162,13 @@ export interface InterviewHistoryItem {
   role_title: string
   interview_length: 'short' | 'medium' | 'long' | null
   target_company: string | null
+  company_id: string | null
+  company_name: string | null
   question_count: number
   answered_count: number
   is_completed: boolean
   score: number | null
+  practice_duration_seconds: number | null
   created_at: string
   completed_at: string | null
 }
@@ -184,4 +190,35 @@ export interface CodingInterventionResponse {
   severity: 'low' | 'medium' | 'high' | 'none'
   reply: string | null
   coding_round: CodingInterviewRound | null
+}
+
+
+export interface Company {
+  id: string
+  name: string
+  description: string | null
+  website: string | null
+  created_at: string
+}
+
+export interface CompanyKnowledgeMetadata {
+  role?: string | null
+  category?: string | null
+  url?: string | null
+}
+
+export interface CompanyKnowledgeSource {
+  id: string
+  company_id: string
+  title: string
+  source_type: 'manual' | 'official_page' | 'job_description' | 'engineering_blog' | 'interview_guide'
+  content: string
+  metadata: CompanyKnowledgeMetadata
+  created_at: string
+}
+
+export interface RagSearchResult {
+  content: string
+  metadata: Record<string, string>
+  distance: number | null
 }

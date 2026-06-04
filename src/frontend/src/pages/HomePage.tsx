@@ -1,28 +1,386 @@
+import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
+import { listInterviewHistory } from '../api'
 import { useAuth } from '../auth'
+import type { InterviewHistoryItem } from '../types'
 import './InterviewFlow.css'
 
+interface HeatmapCell {
+  dateKey: string
+  label: string
+  count: number
+}
+
+const HEATMAP_DAYS = 112
+const HEATMAP_WEEKDAY_LABELS = ['Mon', 'Wed', 'Fri']
+const LENGTH_LABELS = {
+  short: 'Short',
+  medium: 'Medium',
+  long: 'Long',
+} as const
+
+function formatDateKey(date: Date): string {
+  return date.toISOString().slice(0, 10)
+}
+
+function formatShortDate(value: string): string {
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(value))
+}
+
+function formatPracticeHours(totalSeconds: number): string {
+  return `${(totalSeconds / 3600).toFixed(1)}h`
+}
+
+function buildTopCompanies(history: InterviewHistoryItem[]) {
+  const usage = new Map<string, { name: string; count: number; averageScore: number | null }>()
+
+  for (const item of history) {
+    const companyName = item.company_name || item.target_company
+    if (!companyName) {
+      continue
+    }
+
+    const existing = usage.get(companyName) ?? {
+      name: companyName,
+      count: 0,
+      averageScore: null,
+    }
+    existing.count += 1
+    usage.set(companyName, existing)
+  }
+
+  return Array.from(usage.values())
+    .map((entry) => {
+      const related = history.filter(
+        (item) =>
+          (item.company_name || item.target_company) === entry.name &&
+          item.is_completed &&
+          typeof item.score === 'number',
+      )
+      const averageScore = related.length
+        ? Math.round(related.reduce((sum, item) => sum + (item.score ?? 0), 0) / related.length)
+        : null
+      return { ...entry, averageScore }
+    })
+    .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name))
+    .slice(0, 4)
+}
+
+function buildHeatmap(history: InterviewHistoryItem[]): HeatmapCell[][] {
+  const counts = new Map<string, number>()
+  for (const item of history) {
+    const created = new Date(item.created_at)
+    const dateKey = formatDateKey(created)
+    counts.set(dateKey, (counts.get(dateKey) ?? 0) + 1)
+  }
+
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+
+  const cells: HeatmapCell[] = []
+  for (let offset = HEATMAP_DAYS - 1; offset >= 0; offset -= 1) {
+    const day = new Date(today)
+    day.setDate(today.getDate() - offset)
+    const dateKey = formatDateKey(day)
+    cells.push({
+      dateKey,
+      count: counts.get(dateKey) ?? 0,
+      label: new Intl.DateTimeFormat(undefined, {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+      }).format(day),
+    })
+  }
+
+  const firstWeekday = (new Date(cells[0].dateKey).getDay() + 6) % 7
+  const padded: HeatmapCell[] = [
+    ...Array.from({ length: firstWeekday }, (_, index) => ({
+      dateKey: `pad-start-${index}`,
+      label: '',
+      count: -1,
+    })),
+    ...cells,
+  ]
+
+  while (padded.length % 7 !== 0) {
+    padded.push({
+      dateKey: `pad-end-${padded.length}`,
+      label: '',
+      count: -1,
+    })
+  }
+
+  const weeks: HeatmapCell[][] = []
+  for (let index = 0; index < padded.length; index += 7) {
+    weeks.push(padded.slice(index, index + 7))
+  }
+  return weeks
+}
+
+function heatmapLevel(count: number, maxCount: number): 0 | 1 | 2 | 3 | 4 {
+  if (count <= 0 || maxCount <= 0) {
+    return 0
+  }
+  const ratio = count / maxCount
+  if (ratio >= 0.8) {
+    return 4
+  }
+  if (ratio >= 0.55) {
+    return 3
+  }
+  if (ratio >= 0.3) {
+    return 2
+  }
+  return 1
+}
+
+function ScoreTrendChart({ sessions }: { sessions: InterviewHistoryItem[] }) {
+  if (sessions.length === 0) {
+    return (
+      <div className="chart-empty-state">
+        <p className="support-copy">Complete your first interview to unlock score trends.</p>
+      </div>
+    )
+  }
+
+  const width = 640
+  const height = 220
+  const padding = 24
+  const innerWidth = width - padding * 2
+  const innerHeight = height - padding * 2
+
+  const points = sessions.map((session, index) => {
+    const score = session.score ?? 0
+    const x = sessions.length === 1 ? width / 2 : padding + (index / (sessions.length - 1)) * innerWidth
+    const y = padding + ((100 - score) / 100) * innerHeight
+    return { x, y, score, id: session.id }
+  })
+
+  const polyline = points.map((point) => `${point.x},${point.y}`).join(' ')
+  const latestScore = sessions[sessions.length - 1]?.score ?? 0
+
+  return (
+    <div className="trend-chart-shell">
+      <svg viewBox={`0 0 ${width} ${height}`} className="trend-chart" role="img" aria-label="Score evolution chart">
+        <defs>
+          <linearGradient id="scoreTrendStroke" x1="0%" x2="100%" y1="0%" y2="0%">
+            <stop offset="0%" stopColor="#fb7185" />
+            <stop offset="100%" stopColor="#f59e0b" />
+          </linearGradient>
+        </defs>
+
+        {[0, 25, 50, 75, 100].map((marker) => {
+          const y = padding + ((100 - marker) / 100) * innerHeight
+          return (
+            <g key={marker}>
+              <line x1={padding} x2={width - padding} y1={y} y2={y} className="trend-grid-line" />
+              <text x={2} y={y + 4} className="trend-axis-label">
+                {marker}
+              </text>
+            </g>
+          )
+        })}
+
+        {points.length > 1 ? (
+          <polyline
+            fill="none"
+            points={polyline}
+            stroke="url(#scoreTrendStroke)"
+            strokeWidth="4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ) : null}
+
+        {points.map((point) => (
+          <circle key={point.id} cx={point.x} cy={point.y} r="5.5" className="trend-point" />
+        ))}
+      </svg>
+
+      <div className="chart-caption-row">
+        <div>
+          <p className="section-eyebrow">Latest Score</p>
+          <strong className="chart-highlight">{latestScore}</strong>
+        </div>
+        <div className="chart-x-labels">
+          <span>{formatShortDate(sessions[0].created_at)}</span>
+          <span>{formatShortDate(sessions[sessions.length - 1].created_at)}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ActivityHeatmap({ history }: { history: InterviewHistoryItem[] }) {
+  const weeks = buildHeatmap(history)
+  const counts = history.map((item) => formatDateKey(new Date(item.created_at)))
+  const activityCounts = new Map<string, number>()
+  for (const key of counts) {
+    activityCounts.set(key, (activityCounts.get(key) ?? 0) + 1)
+  }
+  const maxCount = Math.max(0, ...activityCounts.values())
+
+  return (
+    <div className="activity-grid-shell">
+      <div className="activity-weekday-labels" aria-hidden="true">
+        <span>{HEATMAP_WEEKDAY_LABELS[0]}</span>
+        <span>{HEATMAP_WEEKDAY_LABELS[1]}</span>
+        <span>{HEATMAP_WEEKDAY_LABELS[2]}</span>
+      </div>
+      <div className="activity-weeks">
+        {weeks.map((week, weekIndex) => (
+          <div key={`week-${weekIndex}`} className="activity-week">
+            {week.map((cell, dayIndex) => {
+              if (cell.count < 0) {
+                return <span key={cell.dateKey} className="activity-cell pad" aria-hidden="true" />
+              }
+
+              const level = heatmapLevel(cell.count, maxCount)
+              return (
+                <span
+                  key={cell.dateKey}
+                  className={`activity-cell level-${level}`}
+                  role="img"
+                  aria-label={`${cell.label}: ${cell.count} interview${cell.count === 1 ? '' : 's'}`}
+                  title={`${cell.label}: ${cell.count} interview${cell.count === 1 ? '' : 's'}`}
+                  data-row={dayIndex}
+                />
+              )
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function LandingCards() {
+  return (
+    <section className="info-grid">
+      <article className="flow-card feature-card">
+        <p className="section-eyebrow">1. Configure</p>
+        <h2>Bring your own context</h2>
+        <p className="mt-2">
+          Paste your CV and job description directly as text or upload them as pdf or docx files.
+        </p>
+      </article>
+
+      <article className="flow-card feature-card">
+        <p className="section-eyebrow">2. Practice</p>
+        <h2>Simulate real interviews</h2>
+        <p className="mt-2">
+          Answer one question at a time in a guided, realistic flow. The AI adapts dynamically,
+          challenging you with behavioral and technical prompts, then stepping into a coding round.
+        </p>
+      </article>
+
+      <article className="flow-card feature-card">
+        <p className="section-eyebrow">3. Review</p>
+        <h2>Get actionable feedback</h2>
+        <p className="mt-2">
+          Review detailed scorecards, strengths, and improvement areas after each session. Revisit
+          past interviews to track progress and refine your answers over time.
+        </p>
+      </article>
+    </section>
+  )
+}
+
 export default function HomePage() {
-  const { isAuthenticated } = useAuth()
+  const { isAuthenticated, isLoading: isAuthLoading } = useAuth()
+  const [history, setHistory] = useState<InterviewHistoryItem[]>([])
+  const [historyError, setHistoryError] = useState<string | null>(null)
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false)
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setHistory([])
+      setHistoryError(null)
+      setIsHistoryLoading(false)
+      return
+    }
+
+    let cancelled = false
+
+    const loadHistory = async () => {
+      setIsHistoryLoading(true)
+      setHistoryError(null)
+
+      try {
+        const items = await listInterviewHistory()
+        if (!cancelled) {
+          setHistory(items)
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setHistoryError(err instanceof Error ? err.message : 'Unable to load dashboard data')
+        }
+      } finally {
+        if (!cancelled) {
+          setIsHistoryLoading(false)
+        }
+      }
+    }
+
+    void loadHistory()
+
+    return () => {
+      cancelled = true
+    }
+  }, [isAuthenticated])
+
+  const completedSessions = history
+    .filter((item) => item.is_completed && typeof item.score === 'number')
+    .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at))
+  const completedCount = history.filter((item) => item.is_completed).length
+  const averageScore = completedSessions.length
+    ? Math.round(completedSessions.reduce((sum, item) => sum + (item.score ?? 0), 0) / completedSessions.length)
+    : null
+  const totalPracticeSeconds = history.reduce(
+    (sum, item) => sum + (item.practice_duration_seconds ?? 0),
+    0,
+  )
+  const activityDays = new Set(history.map((item) => formatDateKey(new Date(item.created_at)))).size
+  const bestScore = completedSessions.length
+    ? Math.max(...completedSessions.map((item) => item.score ?? 0))
+    : null
+  const completionRate = history.length === 0 ? 0 : Math.round((completedCount / history.length) * 100)
+  const scoreDelta =
+    completedSessions.length >= 2
+      ? (completedSessions[completedSessions.length - 1]?.score ?? 0) -
+        (completedSessions[completedSessions.length - 2]?.score ?? 0)
+      : null
+  const lengthBreakdown = {
+    short: history.filter((item) => item.interview_length === 'short').length,
+    medium: history.filter((item) => item.interview_length === 'medium').length,
+    long: history.filter((item) => item.interview_length === 'long').length,
+  }
+  const maxLengthCount = Math.max(1, lengthBreakdown.short, lengthBreakdown.medium, lengthBreakdown.long)
+  const topCompanies = buildTopCompanies(history)
 
   return (
     <section className="home-layout">
-      <article className="hero-card">
+      <article className={isAuthenticated ? 'hero-card dashboard-hero' : 'hero-card'}>
         <p className="section-eyebrow">Interview Simulator</p>
-        <h1>Run full mock interviews and get instant detailed feedback.</h1>
+        <h1>
+          {isAuthenticated
+            ? 'Track your interview practice like a real training loop.'
+            : 'Run full mock interviews and get instant detailed feedback.'}
+        </h1>
         <p className="support-copy">
-          Upload or paste your CV and target job description, pick the interview length, answer one
-          question at a time, move into a live coding round with an AI interviewer, and finish with
-          a scored performance report.
+          {isAuthenticated
+            ? 'Your dashboard brings together recent scores, interview volume, and practice consistency so you can see whether your preparation is improving over time.'
+            : 'Upload or paste your CV and target job description, pick the interview length, answer one question at a time, move into a live coding round, and finish with a scored performance report.'}
         </p>
         <div className="hero-actions">
           {isAuthenticated ? (
             <>
               <NavLink to="/interviews/new" className="primary-button">
-                Configure Interview
+                Start New Interview
               </NavLink>
               <NavLink to="/interviews/history" className="secondary-button">
-                View History
+                Open History
               </NavLink>
             </>
           ) : (
@@ -38,34 +396,131 @@ export default function HomePage() {
         </div>
       </article>
 
-      <section className="info-grid">
-        <article className="flow-card feature-card">
-          <p className="section-eyebrow">1. Configure</p>
-          <h2>Bring your own context</h2>
-          <p className="mt-2">
-            Paste your CV and job description direcly as text or upload them as pdf or docx files.
-          </p>
-        </article>
+      {isAuthenticated ? (
+        <>
+          {isAuthLoading || isHistoryLoading ? (
+            <article className="flow-card">
+              <p className="section-eyebrow">Dashboard</p>
+              <h2>Loading your practice dashboard...</h2>
+            </article>
+          ) : historyError ? (
+            <article className="flow-card">
+              <p className="section-eyebrow">Dashboard</p>
+              <h2>Dashboard unavailable</h2>
+              <p className="support-copy">{historyError}</p>
+            </article>
+          ) : (
+            <>
+              <section className="dashboard-stats-grid">
+                <article className="dashboard-stat-card">
+                  <p>Total interviews</p>
+                  <strong>{history.length}</strong>
+                  <span>{completedCount} completed</span>
+                </article>
+                <article className="dashboard-stat-card spotlight">
+                  <p>Average score</p>
+                  <strong>{averageScore ?? '--'}</strong>
+                  <span>
+                    {scoreDelta === null
+                      ? 'Need at least two completed interviews for a trend'
+                      : `${scoreDelta >= 0 ? '+' : ''}${scoreDelta} vs previous session`}
+                  </span>
+                </article>
+                <article className="dashboard-stat-card">
+                  <p>Practice time</p>
+                  <strong>{formatPracticeHours(totalPracticeSeconds)}</strong>
+                  <span>Tracked while the interview page is active</span>
+                </article>
+                <article className="dashboard-stat-card">
+                  <p>Practice days</p>
+                  <strong>{activityDays}</strong>
+                  <span>{completionRate}% completion rate</span>
+                </article>
+              </section>
 
-        <article className="flow-card feature-card">
-          <p className="section-eyebrow">2. Practice</p>
-          <h2>Simulate real interviews</h2>
-          <p className="mt-2">
-            Answer one question at a time in a guided, realistic flow. The AI adapts dynamically,
-            challenging you with behavioral and technical prompts, then stepping into a realistic
-            coding interview with short live follow-ups.
-          </p>
-        </article>
+              <section className="dashboard-grid">
+                <article className="flow-card dashboard-panel chart-panel">
+                  <div className="section-head">
+                    <div>
+                      <p className="section-eyebrow">Score Evolution</p>
+                      <h2>See whether your answers are getting stronger</h2>
+                    </div>
+                    {bestScore !== null ? <span className="length-pill">Best {bestScore}</span> : null}
+                  </div>
+                  <ScoreTrendChart sessions={completedSessions} />
+                </article>
 
-        <article className="flow-card feature-card">
-          <p className="section-eyebrow">3. Review</p>
-          <h2>Get actionable feedback</h2>
-          <p className="mt-2">
-            Review detailed scorecards, strengths, and improvement areas after each session.
-            Revisit past interviews to track progress and refine your answers over time.
-          </p>
-        </article>
-      </section>
+                <article className="flow-card dashboard-panel">
+                  <div className="section-head">
+                    <div>
+                      <p className="section-eyebrow">Practice Rhythm</p>
+                      <h2>Recent activity over the last 16 weeks</h2>
+                    </div>
+                  </div>
+                  <ActivityHeatmap history={history} />
+                  <div className="activity-legend">
+                    <span>Less</span>
+                    <div className="activity-legend-scale">
+                      <span className="activity-cell level-0" />
+                      <span className="activity-cell level-1" />
+                      <span className="activity-cell level-2" />
+                      <span className="activity-cell level-3" />
+                      <span className="activity-cell level-4" />
+                    </div>
+                    <span>More</span>
+                  </div>
+                </article>
+
+                <article className="flow-card dashboard-panel">
+                  <p className="section-eyebrow">Interview Mix</p>
+                  <h2>How you are distributing practice length</h2>
+                  <div className="mix-chart">
+                    {(['short', 'medium', 'long'] as const).map((length) => {
+                      const value = lengthBreakdown[length]
+                      const width = `${(value / maxLengthCount) * 100}%`
+                      return (
+                        <div key={length} className="mix-row">
+                          <div className="mix-copy">
+                            <strong>{LENGTH_LABELS[length]}</strong>
+                            <span>{value} sessions</span>
+                          </div>
+                          <div className="mix-bar-track">
+                            <div className={`mix-bar ${length}`} style={{ width }} />
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </article>
+
+                <article className="flow-card dashboard-panel insight-panel">
+                  <p className="section-eyebrow">Top Companies</p>
+                  <h2>Where you focus most of your preparation</h2>
+                  {topCompanies.length === 0 ? (
+                    <p className="support-copy">
+                      Start a company-specific interview to see which targets dominate your practice.
+                    </p>
+                  ) : (
+                    <div className="company-usage-list">
+                      {topCompanies.map((company) => (
+                        <article key={company.name} className="company-usage-card">
+                          <div>
+                            <strong>{company.name}</strong>
+                            <span>{company.count} session{company.count === 1 ? '' : 's'}</span>
+                          </div>
+                          <b>{company.averageScore ?? '--'}</b>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </article>
+              </section>
+            </>
+          )}
+        </>
+      ) : (
+        <LandingCards />
+      )}
     </section>
   )
 }

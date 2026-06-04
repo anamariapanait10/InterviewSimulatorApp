@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ChangeEvent, Dispatch, SetStateAction } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { createInterview, parseDocument } from '../api'
+import { createInterview, listCompanies, parseDocument } from '../api'
+import type { Company } from '../types'
 import './InterviewFlow.css'
 
 type InputMode = 'text' | 'file'
@@ -113,11 +114,38 @@ export default function InterviewSetupPage() {
   })
   const [interviewLength, setInterviewLength] = useState<InterviewLength>('medium')
   const [targetCompany, setTargetCompany] = useState('')
+  const [companies, setCompanies] = useState<Company[]>([])
+  const [selectedCompanyId, setSelectedCompanyId] = useState('')
   const [codingDifficulty, setCodingDifficulty] = useState<CodingDifficulty>('medium')
   const [interviewerMode, setInterviewerMode] = useState<InterviewerMode>('neutral')
   const [preferredLanguage, setPreferredLanguage] = useState<PreferredLanguage>('typescript')
   const [error, setError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+
+    const loadCompanies = async () => {
+      try {
+        const items = await listCompanies()
+        if (cancelled) {
+          return
+        }
+        setCompanies(items)
+      } catch {
+        if (!cancelled) {
+          setCompanies([])
+        }
+      }
+    }
+
+    void loadCompanies()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const selectedCompany = companies.find((company) => company.id === selectedCompanyId) ?? null
 
   const handleFileParse = async (
     file: File | undefined,
@@ -162,7 +190,8 @@ export default function InterviewSetupPage() {
         resume_text: resumeText,
         job_description_text: jobDescriptionText,
         interview_length: interviewLength,
-        target_company: targetCompany.trim() || undefined,
+        target_company: targetCompany.trim() || selectedCompany?.name || undefined,
+        company_id: selectedCompanyId || undefined,
         coding_difficulty: codingDifficulty,
         interviewer_mode: interviewerMode,
         preferred_language: preferredLanguage,
@@ -238,19 +267,39 @@ export default function InterviewSetupPage() {
         </div>
 
         <div className="setup-grid coding-config-grid">
-          <div>
+          <div className="company-select-wrap">
+            <label htmlFor="company-select" className="field-label">
+              Company knowledge workspace
+            </label>
+            <select
+              id="company-select"
+              className="text-input"
+              value={selectedCompanyId}
+              onChange={(event) => setSelectedCompanyId(event.target.value)}
+            >
+              <option value="">No company knowledge selected</option>
+              {companies.map((company) => (
+                <option key={company.id} value={company.id}>
+                  {company.name}
+                </option>
+              ))}
+            </select>
+            <p className="support-copy mt-2">
+              Select a saved company to inject indexed interview knowledge into question generation.
+            </p>
+
             <label htmlFor="company-input" className="field-label">
-              Target company
+              Coding round target company
             </label>
             <input
               id="company-input"
               className="text-input"
               value={targetCompany}
               onChange={(event) => setTargetCompany(event.target.value)}
-              placeholder="Google, Meta, Amazon..."
+              placeholder={selectedCompany?.name ?? 'Google, Meta, Amazon...'}
             />
             <p className="support-copy mt-2">
-              If the company is missing, the system will pick the closest problem style from the bank.
+              Leave this blank to reuse the selected company above, or type a custom company for coding-bank matching.
             </p>
           </div>
 

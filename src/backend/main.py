@@ -15,6 +15,7 @@ from typing import Any
 from uuid import UUID
 
 import fastapi
+import fastapi.concurrency
 import fastapi.responses
 import fastapi.staticfiles
 import httpx
@@ -23,6 +24,7 @@ import telemetry
 from pydantic import BaseModel, Field
 
 from auth_store import AuthRepository, UserModel
+from company_store import CompanyKnowledgeSourceModel, CompanyModel, CompanyRepository
 from coding_interview_engine import (
     CodingInterventionDecisionModel,
     InterviewInterventionEngine,
@@ -46,10 +48,12 @@ from interview_data_store import (
     SessionTurnUpdate,
     utcnow,
 )
+from services.rag_service import delete_company_knowledge, index_company_document, retrieve_company_context
 
 
 repo = InterviewSessionRepository()
 auth_repo = AuthRepository()
+company_repo = CompanyRepository()
 intervention_engine = InterviewInterventionEngine()
 
 
@@ -59,6 +63,7 @@ async def lifespan(app):
     await auth_repo.init_db()
     await auth_repo.delete_expired_tokens()
     await repo.init_db()
+    await company_repo.init_db()
     yield
 
 
@@ -129,11 +134,46 @@ class ParsedDocumentResponse(BaseModel):
     extracted_text: str
 
 
+class CompanyCreateRequest(BaseModel):
+    name: str = Field(min_length=1)
+    description: str | None = None
+    website: str | None = None
+
+
+class CompanyKnowledgeMetadata(BaseModel):
+    role: str | None = None
+    category: str | None = None
+    url: str | None = None
+
+
+class CompanyKnowledgeTextRequest(BaseModel):
+    title: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+    source_type: str = Field(
+        pattern="^(manual|official_page|job_description|engineering_blog|interview_guide)$"
+    )
+    metadata: CompanyKnowledgeMetadata = Field(default_factory=CompanyKnowledgeMetadata)
+
+
+class CompanyKnowledgeUpdateRequest(BaseModel):
+    title: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+    source_type: str = Field(
+        pattern="^(manual|official_page|job_description|engineering_blog|interview_guide)$"
+    )
+    metadata: CompanyKnowledgeMetadata = Field(default_factory=CompanyKnowledgeMetadata)
+
+
+class RagSearchRequest(BaseModel):
+    query: str = Field(min_length=1)
+    top_k: int = Field(default=5, ge=1, le=10)
+
 class InterviewCreateRequest(BaseModel):
     resume_text: str = Field(min_length=1)
     job_description_text: str = Field(min_length=1)
     interview_length: str = Field(pattern="^(short|medium|long)$")
     target_company: str | None = Field(default=None, max_length=80)
+    company_id: str | None = None
     coding_difficulty: str = Field(default="medium", pattern="^(easy|medium|hard)$")
     interviewer_mode: str = Field(default="neutral", pattern="^(warm|neutral|bar_raiser|silent)$")
     preferred_language: str = Field(default="typescript", pattern="^(typescript|javascript|python|java|csharp)$")
@@ -141,6 +181,10 @@ class InterviewCreateRequest(BaseModel):
 
 class InterviewAnswerRequest(BaseModel):
     answer_text: str = Field(min_length=1)
+
+
+class PracticeDurationUpdateRequest(BaseModel):
+    seconds: int = Field(ge=1, le=3600)
 
 
 class InterviewFinishRequest(BaseModel):
@@ -155,15 +199,34 @@ class InterviewHelpResponse(BaseModel):
     content: str
 
 
+class CompanyKnowledgeSourceResponse(BaseModel):
+    id: str
+    company_id: str
+    title: str
+    source_type: str
+    content: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class RagSearchResult(BaseModel):
+    content: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    distance: float | None = None
+
+
 class InterviewHistoryItem(BaseModel):
     id: str
     role_title: str
     interview_length: str | None = None
     target_company: str | None = None
+    company_id: str | None = None
+    company_name: str | None = None
     question_count: int
     answered_count: int
     is_completed: bool
     score: int | None = None
+    practice_duration_seconds: int | None = None
     created_at: str
     completed_at: str | None = None
 
@@ -227,6 +290,125 @@ def _safe_excerpt(text: str, limit: int = 220) -> str:
 
 def _normalize_email(email: str) -> str:
     return email.strip().lower()
+
+
+
+def _source_to_response(source: CompanyKnowledgeSourceModel) -> CompanyKnowledgeSourceResponse:
+    return CompanyKnowledgeSourceResponse(
+        id=str(source.id),
+        company_id=str(source.company_id),
+        title=source.title,
+        source_type=source.source_type,
+        content=source.content,
+        metadata=source.metadata_json,
+        created_at=source.created_at.isoformat(),
+    )
+
+
+async def _require_company(company_id: str) -> CompanyModel:
+    try:
+        company_uuid = UUID(company_id)
+    except ValueError as exc:
+        raise fastapi.HTTPException(status_code=400, detail="Invalid company id") from exc
+
+    company = await company_repo.get_company(company_uuid)
+    if company is None:
+        raise fastapi.HTTPException(status_code=404, detail="Company not found")
+    return company
+
+
+def _build_company_rag_query(*, job_description_text: str, role_title: str, question_prompt: str | None = None) -> str:
+    parts = [role_title.strip(), job_description_text.strip()[:1800]]
+    if question_prompt:
+        parts.append(question_prompt.strip())
+    return "\n\n".join(part for part in parts if part)
+
+
+async def _retrieve_company_context_text(
+    *,
+    company_id: UUID | None,
+    company_name: str | None,
+    query: str,
+    top_k: int = 5,
+) -> str | None:
+    if company_id is None or not query.strip():
+        return None
+
+    try:
+        rows = await fastapi.concurrency.run_in_threadpool(
+            retrieve_company_context,
+            str(company_id),
+            query,
+            top_k,
+        )
+    except Exception:
+        logger.exception("company rag retrieval failed for company_id=%s", company_id)
+        return None
+
+    if not rows:
+        return None
+
+    blocks: list[str] = []
+    for index, row in enumerate(rows, start=1):
+        metadata = row.get("metadata") or {}
+        title = str(metadata.get("title") or f"Source {index}")
+        source_type = str(metadata.get("source_type") or "knowledge")
+        role = str(metadata.get("role") or "").strip()
+        category = str(metadata.get("category") or "").strip()
+        content = _normalize_whitespace(str(row.get("content") or ""))
+        labels = ", ".join(part for part in [source_type, role, category] if part)
+        header = f"{index}. {title}" if not labels else f"{index}. {title} ({labels})"
+        blocks.append(f"{header}\n{content}")
+
+    company_label = company_name or "the target company"
+    return (
+        f"Company-specific knowledge for {company_label}.\n"
+        "Use it as supporting context when tailoring questions or answers, but stay grounded in the resume and job description.\n\n"
+        + "\n\n".join(blocks)
+    )
+
+
+async def _reindex_company_knowledge(company: CompanyModel, sources: list[CompanyKnowledgeSourceModel]) -> None:
+    await fastapi.concurrency.run_in_threadpool(delete_company_knowledge, str(company.id))
+
+    for source in sources:
+        await fastapi.concurrency.run_in_threadpool(
+            index_company_document,
+            str(company.id),
+            company.name,
+            source.title,
+            source.content,
+            source.source_type,
+            {
+                **source.metadata_json,
+                "source_id": str(source.id),
+                "created_at": source.created_at.isoformat(),
+            },
+        )
+
+
+def _merge_knowledge_metadata(
+    metadata: CompanyKnowledgeMetadata,
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    merged = dict(fallback or {})
+    if metadata.role:
+        merged["role"] = metadata.role
+    if metadata.category:
+        merged["category"] = metadata.category
+    if metadata.url:
+        merged["url"] = metadata.url
+    return merged
+
+
+def _parse_metadata_form(metadata_json: str | None) -> CompanyKnowledgeMetadata:
+    if not metadata_json:
+        return CompanyKnowledgeMetadata()
+    try:
+        payload = json.loads(metadata_json)
+    except json.JSONDecodeError as exc:
+        raise fastapi.HTTPException(status_code=400, detail="metadata_json must be valid JSON") from exc
+    return CompanyKnowledgeMetadata.model_validate(payload if isinstance(payload, dict) else {})
 
 
 def _hash_password(password: str) -> str:
@@ -559,6 +741,9 @@ async def _generate_ai_questions(
     resume_text: str,
     job_description_text: str,
     interview_length: str,
+    *,
+    company_name: str | None = None,
+    company_context: str | None = None,
 ) -> tuple[str, list[InterviewQuestionModel]]:
     counts = INTERVIEW_LENGTH_OPTIONS[interview_length]
     payload = await _post_agent_json(
@@ -569,6 +754,8 @@ async def _generate_ai_questions(
             "interview_length": interview_length,
             "behavioral_count": counts["behavioral"],
             "technical_count": counts["technical"],
+            "company_name": company_name,
+            "company_context": company_context,
         },
     )
 
@@ -656,6 +843,8 @@ async def _build_coding_round(
 async def _generate_ai_report(
     session: InterviewSessionModel,
     answers: list[InterviewAnswerModel],
+    *,
+    company_context: str | None = None,
 ) -> tuple[int, InterviewReportModel]:
     payload = await _post_agent_json(
         "/interview/report",
@@ -666,6 +855,8 @@ async def _generate_ai_report(
             "role_title": session.role_title or _extract_role_title(session.job_description_text or ""),
             "questions": [question.model_dump(mode="json") for question in session.questions],
             "answers": [answer.model_dump(mode="json") for answer in answers],
+            "company_name": session.company_name or session.target_company,
+            "company_context": company_context,
             "coding_feedback_input": (
                 session.coding_round.evaluation.summary
                 if session.coding_round and session.coding_round.evaluation
@@ -713,6 +904,8 @@ async def _generate_ai_help(
     help_kind: str,
     session: InterviewSessionModel,
     question: InterviewQuestionModel,
+    *,
+    company_context: str | None = None,
 ) -> str:
     payload = await _post_agent_json(
         "/interview/help",
@@ -722,6 +915,8 @@ async def _generate_ai_help(
             "question": question.model_dump(mode="json"),
             "resume_text": session.resume_text or "",
             "job_description_text": session.job_description_text or "",
+            "company_name": session.company_name or session.target_company,
+            "company_context": company_context,
         },
     )
 
@@ -771,10 +966,13 @@ def _history_item_from_session(session: InterviewSessionModel) -> InterviewHisto
         role_title=session.role_title or _extract_role_title(session.job_description_text or "") or "Interview",
         interview_length=session.interview_length,
         target_company=session.target_company,
+        company_id=str(session.company_id) if session.company_id else None,
+        company_name=session.company_name,
         question_count=len(session.questions),
         answered_count=len(session.answers),
         is_completed=session.is_completed,
         score=session.score,
+        practice_duration_seconds=session.practice_duration_seconds,
         created_at=session.created_at.isoformat(),
         completed_at=session.completed_at.isoformat() if session.completed_at else None,
     )
@@ -865,7 +1063,15 @@ async def _finalize_completed_session(
     *,
     transcript_entry: str | None = None,
 ) -> InterviewSessionModel:
-    score, report = await _generate_ai_report(session, session.answers)
+    company_context = await _retrieve_company_context_text(
+        company_id=session.company_id,
+        company_name=session.company_name,
+        query=_build_company_rag_query(
+            job_description_text=session.job_description_text or "",
+            role_title=session.role_title or _extract_role_title(session.job_description_text or ""),
+        ),
+    )
+    score, report = await _generate_ai_report(session, session.answers, company_context=company_context)
 
     updated = await repo.update_interview_session(
         InterviewSessionModel(
@@ -984,6 +1190,210 @@ async def logout(token: str = fastapi.Depends(_get_bearer_token)):
     return {"ok": True}
 
 
+@app.get("/api/companies", response_model=list[CompanyModel])
+async def list_companies(_: UserModel = fastapi.Depends(_get_current_user)):
+    return await company_repo.list_companies()
+
+
+@app.post("/api/companies", response_model=CompanyModel)
+async def create_company(
+    payload: CompanyCreateRequest,
+    _: UserModel = fastapi.Depends(_get_current_user),
+):
+    try:
+        return await company_repo.create_company(payload.name, payload.description, payload.website)
+    except sqlite3.IntegrityError as exc:
+        raise fastapi.HTTPException(status_code=409, detail="A company with this name already exists") from exc
+
+
+@app.get("/api/companies/{company_id}", response_model=CompanyModel)
+async def get_company(
+    company_id: UUID,
+    _: UserModel = fastapi.Depends(_get_current_user),
+):
+    company = await company_repo.get_company(company_id)
+    if company is None:
+        raise fastapi.HTTPException(status_code=404, detail="Company not found")
+    return company
+
+
+@app.post("/api/companies/{company_id}/knowledge/text", response_model=CompanyKnowledgeSourceResponse)
+async def add_company_knowledge_text(
+    company_id: UUID,
+    payload: CompanyKnowledgeTextRequest,
+    _: UserModel = fastapi.Depends(_get_current_user),
+):
+    company = await company_repo.get_company(company_id)
+    if company is None:
+        raise fastapi.HTTPException(status_code=404, detail="Company not found")
+
+    metadata = _merge_knowledge_metadata(payload.metadata)
+    source = await company_repo.create_knowledge_source(
+        company_id=company.id,
+        title=payload.title,
+        source_type=payload.source_type,
+        content=payload.content.strip(),
+        metadata_json=metadata,
+    )
+
+    try:
+        await fastapi.concurrency.run_in_threadpool(
+            index_company_document,
+            str(company.id),
+            company.name,
+            source.title,
+            source.content,
+            source.source_type,
+            {
+                **source.metadata_json,
+                "source_id": str(source.id),
+                "created_at": source.created_at.isoformat(),
+            },
+        )
+    except Exception as exc:
+        await company_repo.delete_knowledge_source(source.id)
+        raise fastapi.HTTPException(status_code=502, detail=f"Unable to index company knowledge: {exc}") from exc
+
+    return _source_to_response(source)
+
+
+@app.post("/api/companies/{company_id}/knowledge/upload", response_model=CompanyKnowledgeSourceResponse)
+async def upload_company_knowledge(
+    company_id: UUID,
+    file: fastapi.UploadFile = fastapi.File(...),
+    title: str | None = fastapi.Form(default=None),
+    source_type: str = fastapi.Form(...),
+    metadata_json: str | None = fastapi.Form(default=None),
+    _: UserModel = fastapi.Depends(_get_current_user),
+):
+    company = await company_repo.get_company(company_id)
+    if company is None:
+        raise fastapi.HTTPException(status_code=404, detail="Company not found")
+    if source_type not in {"manual", "official_page", "job_description", "engineering_blog", "interview_guide"}:
+        raise fastapi.HTTPException(status_code=400, detail="Unsupported source_type")
+
+    parsed = await _parse_document_with_markitdown(file)
+    metadata = _merge_knowledge_metadata(_parse_metadata_form(metadata_json))
+    source = await company_repo.create_knowledge_source(
+        company_id=company.id,
+        title=(title or parsed.file_name).strip(),
+        source_type=source_type,
+        content=parsed.extracted_text,
+        metadata_json=metadata,
+    )
+
+    try:
+        await fastapi.concurrency.run_in_threadpool(
+            index_company_document,
+            str(company.id),
+            company.name,
+            source.title,
+            source.content,
+            source.source_type,
+            {
+                **source.metadata_json,
+                "source_id": str(source.id),
+                "created_at": source.created_at.isoformat(),
+            },
+        )
+    except Exception as exc:
+        await company_repo.delete_knowledge_source(source.id)
+        raise fastapi.HTTPException(status_code=502, detail=f"Unable to index uploaded knowledge: {exc}") from exc
+
+    return _source_to_response(source)
+
+
+@app.get("/api/companies/{company_id}/knowledge", response_model=list[CompanyKnowledgeSourceResponse])
+async def list_company_knowledge(
+    company_id: UUID,
+    _: UserModel = fastapi.Depends(_get_current_user),
+):
+    company = await company_repo.get_company(company_id)
+    if company is None:
+        raise fastapi.HTTPException(status_code=404, detail="Company not found")
+    return [_source_to_response(source) for source in await company_repo.list_knowledge_sources(company.id)]
+
+
+@app.put("/api/companies/{company_id}/knowledge/{source_id}", response_model=CompanyKnowledgeSourceResponse)
+async def update_company_knowledge(
+    company_id: UUID,
+    source_id: UUID,
+    payload: CompanyKnowledgeUpdateRequest,
+    _: UserModel = fastapi.Depends(_get_current_user),
+):
+    company = await company_repo.get_company(company_id)
+    if company is None:
+        raise fastapi.HTTPException(status_code=404, detail="Company not found")
+
+    existing = await company_repo.get_knowledge_source(source_id)
+    if existing is None or existing.company_id != company.id:
+        raise fastapi.HTTPException(status_code=404, detail="Knowledge source not found")
+
+    updated = await company_repo.update_knowledge_source(
+        source_id,
+        title=payload.title,
+        source_type=payload.source_type,
+        content=payload.content.strip(),
+        metadata_json=_merge_knowledge_metadata(payload.metadata),
+    )
+    if updated is None:
+        raise fastapi.HTTPException(status_code=404, detail="Knowledge source not found")
+
+    try:
+        sources = await company_repo.list_knowledge_sources(company.id)
+        await _reindex_company_knowledge(company, sources)
+    except Exception as exc:
+        raise fastapi.HTTPException(status_code=502, detail=f"Unable to reindex company knowledge: {exc}") from exc
+
+    return _source_to_response(updated)
+
+
+@app.delete("/api/companies/{company_id}/knowledge/{source_id}")
+async def delete_company_knowledge_source(
+    company_id: UUID,
+    source_id: UUID,
+    _: UserModel = fastapi.Depends(_get_current_user),
+):
+    company = await company_repo.get_company(company_id)
+    if company is None:
+        raise fastapi.HTTPException(status_code=404, detail="Company not found")
+
+    existing = await company_repo.get_knowledge_source(source_id)
+    if existing is None or existing.company_id != company.id:
+        raise fastapi.HTTPException(status_code=404, detail="Knowledge source not found")
+
+    await company_repo.delete_knowledge_source(source_id)
+
+    try:
+        sources = await company_repo.list_knowledge_sources(company.id)
+        await _reindex_company_knowledge(company, sources)
+    except Exception as exc:
+        raise fastapi.HTTPException(status_code=502, detail=f"Unable to reindex company knowledge: {exc}") from exc
+
+    return {"ok": True}
+
+
+@app.post("/api/companies/{company_id}/rag/search", response_model=list[RagSearchResult])
+async def search_company_knowledge(
+    company_id: UUID,
+    payload: RagSearchRequest,
+    _: UserModel = fastapi.Depends(_get_current_user),
+):
+    company = await company_repo.get_company(company_id)
+    if company is None:
+        raise fastapi.HTTPException(status_code=404, detail="Company not found")
+    try:
+        results = await fastapi.concurrency.run_in_threadpool(
+            retrieve_company_context,
+            str(company.id),
+            payload.query,
+            payload.top_k,
+        )
+    except Exception as exc:
+        raise fastapi.HTTPException(status_code=502, detail=f"Unable to search company knowledge: {exc}") from exc
+    return [RagSearchResult.model_validate(item) for item in results]
+
+
 @app.post("/api/interviews/parse-document", response_model=ParsedDocumentResponse)
 async def parse_document(
     file: fastapi.UploadFile = fastapi.File(...),
@@ -999,15 +1409,28 @@ async def create_interview(
 ):
     resume_text = payload.resume_text.strip()
     job_description_text = payload.job_description_text.strip()
+    company = await _require_company(payload.company_id) if payload.company_id else None
+    target_company = (payload.target_company or "").strip() or (company.name if company else None)
+    role_title_guess = _extract_role_title(job_description_text)
+    company_context = await _retrieve_company_context_text(
+        company_id=company.id if company else None,
+        company_name=company.name if company else None,
+        query=_build_company_rag_query(
+            job_description_text=job_description_text,
+            role_title=role_title_guess,
+        ),
+    )
 
     role_title, questions = await _generate_ai_questions(
         resume_text,
         job_description_text,
         payload.interview_length,
+        company_name=company.name if company else None,
+        company_context=company_context,
     )
 
     coding_round = await _build_coding_round(
-        target_company=payload.target_company,
+        target_company=target_company,
         difficulty=payload.coding_difficulty,
         interviewer_mode=payload.interviewer_mode,
         preferred_language=payload.preferred_language,
@@ -1017,11 +1440,13 @@ async def create_interview(
 
     record = InterviewSessionModel(
         user_id=current_user.id,
+        company_id=company.id if company else None,
+        company_name=company.name if company else None,
         resume_text=resume_text,
         job_description_text=job_description_text,
         interview_length=payload.interview_length,
         role_title=role_title,
-        target_company=(payload.target_company or "").strip() or None,
+        target_company=target_company,
         questions=questions,
         answers=[],
         current_question_index=0,
@@ -1128,6 +1553,24 @@ async def skip_interview_question(
     if updated.current_question_index < len(updated.questions) or updated.coding_round is not None:
         return updated
     return await _finalize_completed_session(updated, current_user)
+
+
+@app.post("/api/interviews/{session_id}/practice-duration", response_model=InterviewSessionModel)
+async def record_practice_duration(
+    session_id: UUID,
+    payload: PracticeDurationUpdateRequest,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
+    session = await repo.get_interview_session(session_id, current_user.id)
+    if session is None:
+        raise fastapi.HTTPException(status_code=404, detail="Interview not found")
+    if session.is_completed:
+        return session
+
+    updated = await repo.increment_practice_duration(session_id, payload.seconds, current_user.id)
+    if updated is None:
+        raise fastapi.HTTPException(status_code=500, detail="Unable to record practice duration")
+    return updated
 
 
 @app.post("/api/interviews/{session_id}/coding/events", response_model=InterviewSessionModel)
@@ -1339,7 +1782,17 @@ async def get_question_hint(
         raise fastapi.HTTPException(status_code=400, detail="No active question available")
 
     question = session.questions[session.current_question_index]
-    content = await _generate_ai_help("hint", session, question)
+    company_context = await _retrieve_company_context_text(
+        company_id=session.company_id,
+        company_name=session.company_name,
+        query=_build_company_rag_query(
+            job_description_text=session.job_description_text or "",
+            role_title=session.role_title or _extract_role_title(session.job_description_text or ""),
+            question_prompt=question.prompt,
+        ),
+        top_k=4,
+    )
+    content = await _generate_ai_help("hint", session, question, company_context=company_context)
     return InterviewHelpResponse(question_id=question.id, content=content)
 
 
@@ -1355,7 +1808,17 @@ async def get_question_model_answer(
         raise fastapi.HTTPException(status_code=400, detail="No active question available")
 
     question = session.questions[session.current_question_index]
-    content = await _generate_ai_help("model_answer", session, question)
+    company_context = await _retrieve_company_context_text(
+        company_id=session.company_id,
+        company_name=session.company_name,
+        query=_build_company_rag_query(
+            job_description_text=session.job_description_text or "",
+            role_title=session.role_title or _extract_role_title(session.job_description_text or ""),
+            question_prompt=question.prompt,
+        ),
+        top_k=4,
+    )
+    content = await _generate_ai_help("model_answer", session, question, company_context=company_context)
     return InterviewHelpResponse(question_id=question.id, content=content)
 
 

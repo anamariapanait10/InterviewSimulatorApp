@@ -6,6 +6,7 @@ import { AuthProvider } from './auth'
 import ProtectedRoute from './components/ProtectedRoute'
 import './index.css'
 import HomePage from './pages/HomePage'
+import CompaniesPage from './pages/CompaniesPage'
 import InterviewDetailPage from './pages/InterviewDetailPage'
 import InterviewHistoryPage from './pages/InterviewHistoryPage'
 import InterviewRunPage from './pages/InterviewRunPage'
@@ -25,6 +26,7 @@ createRoot(document.getElementById('root')!).render(
             <Route path="register" element={<RegisterPage />} />
             <Route element={<ProtectedRoute />}>
               <Route path="interviews/new" element={<InterviewSetupPage />} />
+              <Route path="companies" element={<CompaniesPage />} />
               <Route path="interviews/history" element={<InterviewHistoryPage />} />
               <Route path="interviews/:sessionId/run" element={<InterviewRunPage />} />
               <Route path="interviews/:sessionId/summary" element={<InterviewSummaryPage />} />
