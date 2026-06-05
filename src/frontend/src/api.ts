@@ -157,6 +157,19 @@ export async function submitInterviewAnswer(
   return parseJson<InterviewSession>(response)
 }
 
+export async function submitInterviewVoiceTurn(
+  sessionId: string,
+  transcriptText: string,
+): Promise<InterviewSession> {
+  const response = await fetch(`/api/interviews/${sessionId}/voice-turn`, {
+    method: 'POST',
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ transcript_text: transcriptText }),
+  })
+
+  return parseJson<InterviewSession>(response)
+}
+
 export async function skipInterviewQuestion(sessionId: string): Promise<InterviewSession> {
   const response = await fetch(`/api/interviews/${sessionId}/skip`, {
     method: 'POST',
@@ -278,6 +291,26 @@ export async function createCodingRealtimeSession(
   transcription_model: string
 }> {
   const response = await fetch(`/api/interviews/${sessionId}/coding/realtime/session`, {
+    method: 'POST',
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload),
+  })
+  return parseJson(response)
+}
+
+export async function createInterviewRealtimeSession(
+  sessionId: string,
+  payload: {
+    sdp: string
+    voice?: string
+  },
+): Promise<{
+  sdp: string
+  model: string
+  voice: string
+  transcription_model: string
+}> {
+  const response = await fetch(`/api/interviews/${sessionId}/realtime/session`, {
     method: 'POST',
     headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload),

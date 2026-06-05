@@ -69,6 +69,30 @@ function extractTranscriptText(event: Record<string, unknown>, defaultText = '')
   return defaultText
 }
 
+async function waitForIceGatheringComplete(peerConnection: RTCPeerConnection): Promise<void> {
+  if (peerConnection.iceGatheringState === 'complete') {
+    return
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      peerConnection.removeEventListener('icegatheringstatechange', handleChange)
+      reject(new Error('Timed out while preparing the voice connection'))
+    }, 5000)
+
+    const handleChange = () => {
+      if (peerConnection.iceGatheringState !== 'complete') {
+        return
+      }
+      window.clearTimeout(timeoutId)
+      peerConnection.removeEventListener('icegatheringstatechange', handleChange)
+      resolve()
+    }
+
+    peerConnection.addEventListener('icegatheringstatechange', handleChange)
+  })
+}
+
 export default function CodingInterviewStage({
   session,
   onSessionChange,
@@ -90,6 +114,7 @@ export default function CodingInterviewStage({
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null)
   const assistantThreadRef = useRef<HTMLDivElement | null>(null)
   const realtimeVoiceRef = useRef('marin')
+  const realtimeTranscriptionModelRef = useRef('gpt-realtime-whisper')
   const shouldKeepListeningRef = useRef(false)
   const speakingResponseActiveRef = useRef(false)
   const latestQuestionRef = useRef('')
@@ -260,22 +285,14 @@ export default function CodingInterviewStage({
           response: {
             conversation: 'none',
             output_modalities: ['audio'],
+            instructions:
+              'Read the provided interviewer line naturally. Keep the wording exact. Do not add or remove words.',
             audio: {
               output: {
                 voice: realtimeVoiceRef.current,
               },
             },
             input: [
-              {
-                type: 'message',
-                role: 'system',
-                content: [
-                  {
-                    type: 'input_text',
-                    text: 'Read the provided interviewer line naturally. Keep the wording exact. Do not add or remove words.',
-                  },
-                ],
-              },
               {
                 type: 'message',
                 role: 'user',
@@ -295,6 +312,42 @@ export default function CodingInterviewStage({
       setLocalMicEnabled(true)
       setVoiceStatus('Unable to play interviewer audio')
     }
+  }
+
+  const sendRealtimeSessionUpdate = (dataChannel: RTCDataChannel) => {
+    if (dataChannel.readyState !== 'open') {
+      return
+    }
+
+    dataChannel.send(
+      JSON.stringify({
+        type: 'session.update',
+        session: {
+          type: 'realtime',
+          instructions:
+            "You are the voice transport layer for a coding interview application. Continuously transcribe the candidate's speech. Do not proactively answer the candidate or ask questions on your own. The application will decide interviewer replies separately. When the application explicitly requests audio output, read the provided interviewer text naturally and keep the wording exact.",
+          output_modalities: ['audio'],
+          audio: {
+            input: {
+              turn_detection: {
+                type: 'server_vad',
+                create_response: false,
+                interrupt_response: false,
+                silence_duration_ms: 900,
+                prefix_padding_ms: 300,
+              },
+              transcription: {
+                model: realtimeTranscriptionModelRef.current,
+                language: 'en',
+              },
+            },
+            output: {
+              voice: realtimeVoiceRef.current,
+            },
+          },
+        },
+      }),
+    )
   }
 
   const handleRealtimeServerEvent = (event: Record<string, unknown>) => {
@@ -454,6 +507,7 @@ export default function CodingInterviewStage({
         setIsListening(true)
         setVoiceStatus('Listening')
         setError(null)
+        sendRealtimeSessionUpdate(dataChannel as RTCDataChannel)
       }
       dataChannel.onclose = () => {
         if (!shouldKeepListeningRef.current) {
@@ -484,11 +538,13 @@ export default function CodingInterviewStage({
 
       const offer = await peerConnection.createOffer()
       await peerConnection.setLocalDescription(offer)
+      await waitForIceGatheringComplete(peerConnection)
 
       const answer = await createCodingRealtimeSession(session.id, {
-        sdp: offer.sdp ?? '',
+        sdp: peerConnection.localDescription?.sdp ?? offer.sdp ?? '',
       })
       realtimeVoiceRef.current = answer.voice
+      realtimeTranscriptionModelRef.current = answer.transcription_model
       await peerConnection.setRemoteDescription({
         type: 'answer',
         sdp: answer.sdp,
@@ -496,6 +552,9 @@ export default function CodingInterviewStage({
 
       peerConnectionRef.current = peerConnection
       dataChannelRef.current = dataChannel
+      if (dataChannel.readyState === 'open') {
+        sendRealtimeSessionUpdate(dataChannel)
+      }
       lastActivityAtRef.current = Date.now()
     } catch (err) {
       shouldKeepListeningRef.current = false

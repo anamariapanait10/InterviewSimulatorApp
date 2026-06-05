@@ -97,6 +97,77 @@ export interface CodingEvaluation {
   concerns: string[]
 }
 
+export interface InterviewRuntimeTurn {
+  id: string
+  stage: 'behavioral' | 'technical' | 'coding' | 'completed'
+  role: 'candidate' | 'interviewer' | 'system'
+  agent_name: string | null
+  kind:
+    | 'question'
+    | 'followup'
+    | 'answer'
+    | 'hint'
+    | 'model_answer'
+    | 'clarification'
+    | 'coding_reply'
+    | 'intervention'
+    | 'transition'
+  content: string
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+export interface InterviewHandoffTrace {
+  from_agent: string
+  to_agent: string
+  stage: 'behavioral' | 'technical' | 'coding' | 'completed'
+  reason: string
+  created_at: string
+}
+
+export interface InterviewDecisionTrace {
+  active_agent: string
+  decision_type: string
+  summary: string
+  stage: 'behavioral' | 'technical' | 'coding' | 'completed'
+  created_at: string
+}
+
+export interface InterviewSupportEntry {
+  mode: 'hint' | 'model_answer'
+  stage: 'behavioral' | 'technical' | 'coding'
+  question_id: string | null
+  content: string
+  created_at: string
+}
+
+export interface InterviewBlueprint {
+  role_title: string
+  behavioral_goal: string
+  technical_goal: string
+  behavioral_target_questions: number
+  technical_target_questions: number
+  target_company: string | null
+  focus_areas: string[]
+}
+
+export interface InterviewEvaluation {
+  behavioral_score: number
+  technical_score: number
+  coding_score: number
+  communication_score: number
+  overall_score: number
+  behavioral_feedback: string
+  technical_feedback: string
+  coding_feedback: string
+  communication_feedback: string
+  summary: string
+  strengths: string[]
+  improvements: string[]
+  hire_recommendation: string
+  recommendation: string
+}
+
 export interface CodingInterviewRound {
   enabled: boolean
   target_company: string | null
@@ -140,15 +211,28 @@ export interface InterviewSession {
   user_id: string | null
   company_id: string | null
   company_name: string | null
+  company_context?: string | null
   resume_text: string | null
   job_description_text: string | null
   interview_length: 'short' | 'medium' | 'long' | null
   role_title: string | null
   target_company: string | null
+  preferred_language?: 'typescript' | 'javascript' | 'python' | 'java' | 'csharp'
+  coding_difficulty?: 'easy' | 'medium' | 'hard'
+  interviewer_mode?: 'warm' | 'neutral' | 'bar_raiser' | 'silent'
+  current_stage: 'behavioral' | 'technical' | 'coding' | 'completed'
+  active_agent: string | null
+  interview_blueprint: InterviewBlueprint | null
+  current_prompt: InterviewRuntimeTurn | null
+  turn_log: InterviewRuntimeTurn[]
+  handoff_history: InterviewHandoffTrace[]
+  decision_trace: InterviewDecisionTrace[]
+  support_history: InterviewSupportEntry[]
   questions: InterviewQuestion[]
   answers: InterviewAnswer[]
   current_question_index: number
   coding_round: CodingInterviewRound | null
+  evaluation: InterviewEvaluation | null
   score: number | null
   report: InterviewReport | null
   is_completed: boolean

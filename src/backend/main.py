@@ -35,19 +35,27 @@ from coding_interview_engine import (
     looks_like_reasoning_update,
 )
 from interview_data_store import (
+    CodingProblemModel,
     CodingConversationTurnModel,
     CodingInterviewEvaluationModel,
     CodingInterviewEventModel,
+    InterviewBlueprintModel,
+    InterviewDecisionTraceModel,
+    InterviewEvaluationModel,
+    InterviewHandoffTraceModel,
     CodingInterviewRoundModel,
     InterviewAnswerModel,
     InterviewQuestionFeedbackModel,
     InterviewQuestionModel,
     InterviewReportModel,
+    InterviewRuntimeTurnModel,
     InterviewSessionModel,
     InterviewSessionRepository,
+    InterviewSupportEntryModel,
     SessionTurnUpdate,
     utcnow,
 )
+from services.problem_catalog_rag_service import index_problem_catalog, search_problem_catalog
 from services.rag_service import delete_company_knowledge, index_company_document, retrieve_company_context
 
 
@@ -64,6 +72,7 @@ async def lifespan(app):
     await auth_repo.delete_expired_tokens()
     await repo.init_db()
     await company_repo.init_db()
+    await fastapi.concurrency.run_in_threadpool(index_problem_catalog)
     yield
 
 
@@ -183,6 +192,10 @@ class InterviewAnswerRequest(BaseModel):
     answer_text: str = Field(min_length=1)
 
 
+class InterviewVoiceTurnRequest(BaseModel):
+    transcript_text: str = Field(min_length=1)
+
+
 class PracticeDurationUpdateRequest(BaseModel):
     seconds: int = Field(ge=1, le=3600)
 
@@ -266,6 +279,66 @@ class CodingRealtimeSessionResponse(BaseModel):
     model: str
     voice: str
     transcription_model: str
+
+
+class ProblemCatalogSearchRequest(BaseModel):
+    query: str = Field(min_length=1)
+    top_k: int = Field(default=5, ge=1, le=10)
+
+
+class RuntimeTurnRequest(BaseModel):
+    turn: InterviewRuntimeTurnModel
+
+
+class RuntimeActiveAgentRequest(BaseModel):
+    active_agent: str = Field(min_length=1)
+
+
+class RuntimeHandoffRequest(BaseModel):
+    handoff: InterviewHandoffTraceModel
+
+
+class RuntimeDecisionTraceRequest(BaseModel):
+    decision: InterviewDecisionTraceModel
+
+
+class RuntimeStageTransitionRequest(BaseModel):
+    stage: str = Field(pattern="^(behavioral|technical|coding|completed)$")
+    reason: str = Field(min_length=1)
+    prompt: InterviewRuntimeTurnModel | None = None
+
+
+class RuntimePromptRequest(BaseModel):
+    prompt: InterviewRuntimeTurnModel
+
+
+class RuntimeSupportRequest(BaseModel):
+    entry: InterviewSupportEntryModel
+
+
+class RuntimeCodingProblemRequest(BaseModel):
+    coding_round: CodingInterviewRoundModel
+
+
+class RuntimeCodingEventRequest(BaseModel):
+    event: CodingInterviewEventModel
+    code: str = ""
+    language: str | None = Field(default=None, pattern="^(typescript|javascript|python|java|csharp)$")
+    transcript_append: str = ""
+
+
+class RuntimeCodingMessageRequest(BaseModel):
+    turn: CodingConversationTurnModel
+
+
+class RuntimeFinalEvaluationRequest(BaseModel):
+    evaluation: InterviewEvaluationModel
+    report: InterviewReportModel | None = None
+
+
+class RuntimeCompleteSessionRequest(BaseModel):
+    report: InterviewReportModel
+    evaluation: InterviewEvaluationModel | None = None
 
 
 def _truncate(text: str, limit: int = 240) -> str:
@@ -582,6 +655,123 @@ async def _post_agent_json(path: str, payload: dict[str, Any]) -> dict[str, Any]
     if not isinstance(data, dict):
         raise fastapi.HTTPException(status_code=502, detail=f"Agent service returned an invalid payload for {path}")
     return data
+
+
+async def _post_orchestrator_action(
+    *,
+    action: str,
+    session_id: UUID,
+    user_input: str = "",
+    help_kind: str | None = None,
+    recent_client_events: list[dict[str, Any]] | None = None,
+    coding_payload: dict[str, Any] | None = None,
+    ui_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "action": action,
+        "session_id": str(session_id),
+        "user_input": user_input,
+        "help_kind": help_kind,
+        "recent_client_events": recent_client_events or [],
+        "coding_payload": coding_payload or {},
+        "ui_context": ui_context or {},
+    }
+    return await _post_agent_json("/orchestrator/act", payload)
+
+
+def _session_transcript_line(role: str, content: str) -> str:
+    cleaned = _normalize_whitespace(content)
+    if not cleaned:
+        return ""
+    return f"{role}: {cleaned}"
+
+
+def _append_transcript_block(existing: str | None, role: str, content: str) -> str | None:
+    line = _session_transcript_line(role, content)
+    if not line:
+        return existing
+    if not existing:
+        return line
+    return f"{existing.strip()}\n{line}"
+
+
+def _append_runtime_turn(session: InterviewSessionModel, turn: InterviewRuntimeTurnModel) -> InterviewSessionModel:
+    turn_log = [*session.turn_log, turn]
+    transcript = _append_transcript_block(session.transcript, turn.role.title(), turn.content)
+    questions = [*session.questions]
+    answers = [*session.answers]
+    current_prompt = session.current_prompt
+    current_question_index = session.current_question_index
+
+    if turn.stage in {"behavioral", "technical"}:
+        if turn.role == "interviewer" and turn.kind in {"question", "followup"}:
+            question = InterviewQuestionModel(
+                id=turn.id,
+                order=len(questions) + 1,
+                category=turn.stage,
+                prompt=turn.content,
+            )
+            questions.append(question)
+            current_prompt = turn
+        elif turn.role == "candidate" and turn.kind == "answer":
+            question = questions[current_question_index] if 0 <= current_question_index < len(questions) else None
+            if question is not None:
+                answers.append(
+                    InterviewAnswerModel(
+                        question_id=question.id,
+                        question_order=question.order,
+                        category=question.category,
+                        question_prompt=question.prompt,
+                        answer_text=turn.content,
+                    )
+                )
+                current_question_index = min(current_question_index + 1, len(questions))
+        elif turn.kind == "transition":
+            current_prompt = None
+
+    if turn.stage == "coding" and session.coding_round is not None and turn.role == "candidate":
+        updated_round = session.coding_round.model_copy(
+            update={
+                "transcript": _normalize_whitespace(
+                    f"{session.coding_round.transcript}\n{turn.content}".strip()
+                )
+            }
+        )
+    else:
+        updated_round = session.coding_round
+
+    return session.model_copy(
+        update={
+            "turn_log": turn_log,
+            "questions": questions,
+            "answers": answers,
+            "current_prompt": current_prompt,
+            "current_question_index": current_question_index,
+            "transcript": transcript,
+            "coding_round": updated_round,
+        }
+    )
+
+
+def _append_handoff_trace(
+    session: InterviewSessionModel,
+    handoff: InterviewHandoffTraceModel,
+) -> InterviewSessionModel:
+    return session.model_copy(update={"handoff_history": [*session.handoff_history, handoff]})
+
+
+def _append_decision_trace(
+    session: InterviewSessionModel,
+    decision: InterviewDecisionTraceModel,
+) -> InterviewSessionModel:
+    return session.model_copy(update={"decision_trace": [*session.decision_trace, decision]})
+
+
+def _append_support_entry(
+    session: InterviewSessionModel,
+    entry: InterviewSupportEntryModel,
+) -> InterviewSessionModel:
+    return session.model_copy(update={"support_history": [*session.support_history, entry]})
 
 
 def _coding_event_needs_reply(recent_events: list[CodingInterviewEventModel], transcript_recent: str) -> bool:
@@ -1394,6 +1584,22 @@ async def search_company_knowledge(
     return [RagSearchResult.model_validate(item) for item in results]
 
 
+@app.post("/api/internal/problem-catalog/search", response_model=list[dict[str, Any]])
+async def search_problem_catalog_endpoint(payload: ProblemCatalogSearchRequest):
+    try:
+        return await fastapi.concurrency.run_in_threadpool(search_problem_catalog, payload.query, payload.top_k)
+    except Exception as exc:
+        raise fastapi.HTTPException(status_code=502, detail=f"Unable to search problem catalog: {exc}") from exc
+
+
+@app.get("/api/internal/coding-problems/{problem_id}", response_model=CodingProblemModel)
+async def get_internal_coding_problem(problem_id: str):
+    problem = await repo.get_coding_problem(problem_id)
+    if problem is None:
+        raise fastapi.HTTPException(status_code=404, detail="Coding problem not found")
+    return problem
+
+
 @app.post("/api/interviews/parse-document", response_model=ParsedDocumentResponse)
 async def parse_document(
     file: fastapi.UploadFile = fastapi.File(...),
@@ -1420,40 +1626,37 @@ async def create_interview(
             role_title=role_title_guess,
         ),
     )
-
-    role_title, questions = await _generate_ai_questions(
-        resume_text,
-        job_description_text,
-        payload.interview_length,
-        company_name=company.name if company else None,
-        company_context=company_context,
-    )
-
-    coding_round = await _build_coding_round(
-        target_company=target_company,
-        difficulty=payload.coding_difficulty,
-        interviewer_mode=payload.interviewer_mode,
-        preferred_language=payload.preferred_language,
-        role_title=role_title,
-        job_description_text=job_description_text,
-    )
-
-    record = InterviewSessionModel(
+    shell_session = InterviewSessionModel(
         user_id=current_user.id,
         company_id=company.id if company else None,
         company_name=company.name if company else None,
+        company_context=company_context,
         resume_text=resume_text,
         job_description_text=job_description_text,
         interview_length=payload.interview_length,
-        role_title=role_title,
+        role_title=role_title_guess,
         target_company=target_company,
-        questions=questions,
+        preferred_language=payload.preferred_language,
+        coding_difficulty=payload.coding_difficulty,
+        interviewer_mode=payload.interviewer_mode,
+        current_stage="behavioral",
+        active_agent="interview_orchestrator_agent",
+        questions=[],
         answers=[],
         current_question_index=0,
-        coding_round=coding_round,
+        coding_round=None,
         is_completed=False,
     )
-    return await repo.add_interview_session(record)
+    created = await repo.add_interview_session(shell_session)
+    payload_data = await _post_orchestrator_action(
+        action="start_session",
+        session_id=created.id,
+        ui_context={"current_surface": "question_stage", "voice_enabled": False, "editor_enabled": False},
+    )
+    session_payload = payload_data.get("session")
+    if not isinstance(session_payload, dict):
+        raise fastapi.HTTPException(status_code=502, detail="Orchestrator did not return a valid interview session")
+    return InterviewSessionModel.model_validate(session_payload)
 
 
 @app.get("/api/interviews", response_model=list[InterviewHistoryItem])
@@ -1484,33 +1687,42 @@ async def submit_interview_answer(
         raise fastapi.HTTPException(status_code=404, detail="Interview not found")
     if session.is_completed:
         raise fastapi.HTTPException(status_code=400, detail="Interview is already completed")
-    if not session.questions:
-        raise fastapi.HTTPException(status_code=400, detail="Interview has no questions")
-    if session.current_question_index >= len(session.questions):
-        raise fastapi.HTTPException(status_code=400, detail="The question stage is already complete")
-
-    current_question = session.questions[session.current_question_index]
-    answer = InterviewAnswerModel(
-        question_id=current_question.id,
-        question_order=current_question.order,
-        category=current_question.category,
-        question_prompt=current_question.prompt,
-        answer_text=payload.answer_text.strip(),
+    result = await _post_orchestrator_action(
+        action="submit_turn",
+        session_id=session_id,
+        user_input=payload.answer_text.strip(),
+        ui_context={"current_surface": "question_stage", "voice_enabled": False, "editor_enabled": False},
     )
+    session_payload = result.get("session")
+    if not isinstance(session_payload, dict):
+        raise fastapi.HTTPException(status_code=502, detail="Orchestrator did not return a valid interview session")
+    return InterviewSessionModel.model_validate(session_payload)
 
-    updated = await repo.update_interview_session(
-        InterviewSessionModel(
-            id=session.id,
-            user_id=session.user_id,
-            answers=[*session.answers, answer],
-            current_question_index=session.current_question_index + 1,
-            transcript=_session_transcript_entry(current_question, answer.answer_text),
-        ),
-        current_user.id,
+
+@app.post("/api/interviews/{session_id}/voice-turn", response_model=InterviewSessionModel)
+async def submit_interview_voice_turn(
+    session_id: UUID,
+    payload: InterviewVoiceTurnRequest,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
+    session = await repo.get_interview_session(session_id, current_user.id)
+    if session is None:
+        raise fastapi.HTTPException(status_code=404, detail="Interview not found")
+    if session.is_completed:
+        raise fastapi.HTTPException(status_code=400, detail="Interview is already completed")
+    if session.current_stage not in {"behavioral", "technical"}:
+        raise fastapi.HTTPException(status_code=400, detail="Voice turns are only accepted before the coding round")
+
+    result = await _post_orchestrator_action(
+        action="voice_turn",
+        session_id=session_id,
+        user_input=payload.transcript_text.strip(),
+        ui_context={"current_surface": "question_stage", "voice_enabled": True, "editor_enabled": False},
     )
-    if updated is None:
-        raise fastapi.HTTPException(status_code=500, detail="Unable to save interview answer")
-    return updated
+    session_payload = result.get("session")
+    if not isinstance(session_payload, dict):
+        raise fastapi.HTTPException(status_code=502, detail="Orchestrator did not return a valid interview session")
+    return InterviewSessionModel.model_validate(session_payload)
 
 
 @app.post("/api/interviews/{session_id}/skip", response_model=InterviewSessionModel)
@@ -1523,36 +1735,15 @@ async def skip_interview_question(
         raise fastapi.HTTPException(status_code=404, detail="Interview not found")
     if session.is_completed:
         raise fastapi.HTTPException(status_code=400, detail="Interview is already completed")
-    if not session.questions:
-        raise fastapi.HTTPException(status_code=400, detail="Interview has no questions")
-    if session.current_question_index >= len(session.questions):
-        raise fastapi.HTTPException(status_code=400, detail="The question stage is already complete")
-
-    current_question = session.questions[session.current_question_index]
-    skipped_answer = InterviewAnswerModel(
-        question_id=current_question.id,
-        question_order=current_question.order,
-        category=current_question.category,
-        question_prompt=current_question.prompt,
-        answer_text="[Skipped by candidate]",
+    result = await _post_orchestrator_action(
+        action="skip_turn",
+        session_id=session_id,
+        ui_context={"current_surface": "question_stage", "voice_enabled": False, "editor_enabled": False},
     )
-
-    updated = await repo.update_interview_session(
-        InterviewSessionModel(
-            id=session.id,
-            user_id=session.user_id,
-            answers=[*session.answers, skipped_answer],
-            current_question_index=session.current_question_index + 1,
-            transcript=_session_transcript_entry(current_question, skipped_answer.answer_text),
-        ),
-        current_user.id,
-    )
-    if updated is None:
-        raise fastapi.HTTPException(status_code=500, detail="Unable to skip interview question")
-
-    if updated.current_question_index < len(updated.questions) or updated.coding_round is not None:
-        return updated
-    return await _finalize_completed_session(updated, current_user)
+    session_payload = result.get("session")
+    if not isinstance(session_payload, dict):
+        raise fastapi.HTTPException(status_code=502, detail="Orchestrator did not return a valid interview session")
+    return InterviewSessionModel.model_validate(session_payload)
 
 
 @app.post("/api/interviews/{session_id}/practice-duration", response_model=InterviewSessionModel)
@@ -1597,6 +1788,7 @@ async def append_coding_event(
     return await _persist_coding_round(session, updated_round, current_user)
 
 
+@app.post("/api/interviews/{session_id}/realtime/session", response_model=CodingRealtimeSessionResponse)
 @app.post("/api/interviews/{session_id}/coding/realtime/session", response_model=CodingRealtimeSessionResponse)
 async def create_coding_realtime_session(
     session_id: UUID,
@@ -1606,8 +1798,6 @@ async def create_coding_realtime_session(
     session = await repo.get_interview_session(session_id, current_user.id)
     if session is None:
         raise fastapi.HTTPException(status_code=404, detail="Interview not found")
-    if session.coding_round is None or session.coding_round.problem is None:
-        raise fastapi.HTTPException(status_code=400, detail="Coding round is not enabled for this interview")
     if session.is_completed:
         raise fastapi.HTTPException(status_code=400, detail="Interview is already completed")
 
@@ -1634,64 +1824,35 @@ async def decide_coding_intervention(
     session = await repo.get_interview_session(session_id, current_user.id)
     if session is None:
         raise fastapi.HTTPException(status_code=404, detail="Interview not found")
-    if session.coding_round is None or session.coding_round.problem is None:
+    if session.current_stage != "coding" or session.coding_round is None:
         raise fastapi.HTTPException(status_code=400, detail="Coding round is not enabled for this interview")
-    if payload.problem_id != session.coding_round.problem.id:
+    if session.coding_round.problem is not None and payload.problem_id != session.coding_round.problem.id:
         raise fastapi.HTTPException(status_code=400, detail="Problem mismatch for coding round")
-
-    working_round = _append_coding_round_state(
-        session.coding_round,
-        code=payload.code,
-        language=payload.language,
-        transcript_append=payload.transcript_recent,
+    result = await _post_orchestrator_action(
+        action="voice_turn",
+        session_id=session_id,
+        user_input=payload.transcript_recent,
+        recent_client_events=[event.model_dump(mode="json") for event in payload.recent_events],
+        coding_payload={
+            "problem_id": payload.problem_id,
+            "code": payload.code,
+            "language": payload.language,
+            "transcript_recent": payload.transcript_recent,
+            "elapsed_time_seconds": payload.elapsed_time_seconds,
+        },
+        ui_context={"current_surface": "coding_stage", "voice_enabled": True, "editor_enabled": True},
     )
-    if payload.recent_events:
-        for event in payload.recent_events:
-            working_round = _append_coding_round_state(working_round, event=event)
-            if event.type in {"candidate_spoke", "clarification_asked", "solution_explained"} and event.transcript_excerpt:
-                working_round = _append_coding_conversation_turn(
-                    working_round,
-                    role="candidate",
-                    content=event.transcript_excerpt,
-                    source_event_type=event.type,
-                )
-
-    decision = intervention_engine.decide(
-        round_state=working_round,
-        transcript_recent=payload.transcript_recent,
-        recent_events=payload.recent_events,
-        elapsed_time_seconds=payload.elapsed_time_seconds,
-        code=payload.code,
-    )
-
-    reply = await _generate_coding_interviewer_reply(
-        round_state=working_round,
-        recent_events=payload.recent_events,
-        transcript_recent=payload.transcript_recent,
-        code=payload.code,
-        decision=decision,
-    )
-
-    persisted_round = apply_intervention(working_round, decision)
-    if reply:
-        source_event_type = payload.recent_events[-1].type if payload.recent_events else None
-        reply_kind = "intervention" if decision.should_interrupt else "reply"
-        persisted_round = _append_coding_conversation_turn(
-            persisted_round,
-            role="interviewer",
-            content=reply,
-            kind=reply_kind,
-            source_event_type=source_event_type,
-            severity=decision.severity if decision.should_interrupt else None,
-        )
-    updated_session = await _persist_coding_round(session, persisted_round, current_user)
-
+    session_payload = result.get("session")
+    if not isinstance(session_payload, dict):
+        raise fastapi.HTTPException(status_code=502, detail="Orchestrator did not return a valid coding session")
+    updated_session = InterviewSessionModel.model_validate(session_payload)
+    handoff = result.get("handoff") if isinstance(result.get("handoff"), dict) else {}
     return CodingInterventionResponse(
-        should_interrupt=decision.should_interrupt,
-        reason=decision.reason,
-        question=decision.question,
-        severity=decision.severity,
-        reply=reply,
+        should_interrupt=bool(result.get("interviewer_output")),
+        reason=str(handoff.get("reason") or "") or None,
+        question=result.get("interviewer_output"),
+        severity="medium" if handoff.get("to_agent") == "coding_agent" else "none",
+        reply=result.get("interviewer_output"),
         coding_round=updated_session.coding_round,
     )
 
@@ -1707,56 +1868,36 @@ async def finish_interview(
         raise fastapi.HTTPException(status_code=404, detail="Interview not found")
     if session.is_completed:
         return session
-    if not session.questions:
-        raise fastapi.HTTPException(status_code=400, detail="Interview has no questions")
-
-    if session.current_question_index < len(session.questions):
-        answer_text = (payload.answer_text or "").strip()
+    if session.current_stage in {"behavioral", "technical"}:
+        answer_text = _strip(payload.answer_text)
         if not answer_text:
-            raise fastapi.HTTPException(status_code=400, detail="Answer text is required for the active question")
+            raise fastapi.HTTPException(status_code=400, detail="Answer text is required for the active interview step")
+        result = await _post_orchestrator_action(
+            action="submit_turn",
+            session_id=session_id,
+            user_input=answer_text,
+            ui_context={"current_surface": "question_stage", "voice_enabled": False, "editor_enabled": False},
+        )
+        session_payload = result.get("session")
+        if not isinstance(session_payload, dict):
+            raise fastapi.HTTPException(status_code=502, detail="Orchestrator did not return a valid interview session")
+        return InterviewSessionModel.model_validate(session_payload)
 
-        current_question = session.questions[session.current_question_index]
-        final_answer = InterviewAnswerModel(
-            question_id=current_question.id,
-            question_order=current_question.order,
-            category=current_question.category,
-            question_prompt=current_question.prompt,
-            answer_text=answer_text,
-        )
-        updated = await repo.update_interview_session(
-            InterviewSessionModel(
-                id=session.id,
-                user_id=session.user_id,
-                answers=[*session.answers, final_answer],
-                current_question_index=session.current_question_index + 1,
-                transcript=_session_transcript_entry(current_question, final_answer.answer_text),
-            ),
-            current_user.id,
-        )
-        if updated is None:
-            raise fastapi.HTTPException(status_code=500, detail="Unable to advance the interview")
-        if updated.current_question_index < len(updated.questions) or updated.coding_round is not None:
-            return updated
-        return await _finalize_completed_session(updated, current_user)
-
-    active_coding_round = session.coding_round
-    if active_coding_round is not None:
-        completed_round = _append_coding_round_state(
-            active_coding_round,
-            code=payload.code,
-            language=payload.language,
-            transcript_append=payload.transcript_recent,
-        )
-        evaluation = await _generate_ai_coding_evaluation(completed_round)
-        finalized_round = completed_round.model_copy(
-            update={
-                "evaluation": evaluation,
-                "completed_at": utcnow(),
-            }
-        )
-        session = session.model_copy(update={"coding_round": finalized_round})
-
-    return await _finalize_completed_session(session, current_user)
+    result = await _post_orchestrator_action(
+        action="finalize_session",
+        session_id=session_id,
+        user_input=payload.transcript_recent,
+        coding_payload={
+            "code": payload.code or (session.coding_round.current_code if session.coding_round else ""),
+            "language": payload.language or (session.coding_round.language if session.coding_round else session.preferred_language),
+            "transcript_recent": payload.transcript_recent,
+        },
+        ui_context={"current_surface": "summary", "voice_enabled": False, "editor_enabled": False},
+    )
+    session_payload = result.get("session")
+    if not isinstance(session_payload, dict):
+        raise fastapi.HTTPException(status_code=502, detail="Final evaluator did not return a valid interview session")
+    return InterviewSessionModel.model_validate(session_payload)
 
 
 @app.delete("/api/interviews/{session_id}")
@@ -1778,22 +1919,17 @@ async def get_question_hint(
     session = await repo.get_interview_session(session_id, current_user.id)
     if session is None:
         raise fastapi.HTTPException(status_code=404, detail="Interview not found")
-    if session.is_completed or session.current_question_index >= len(session.questions):
+    if session.is_completed:
         raise fastapi.HTTPException(status_code=400, detail="No active question available")
-
-    question = session.questions[session.current_question_index]
-    company_context = await _retrieve_company_context_text(
-        company_id=session.company_id,
-        company_name=session.company_name,
-        query=_build_company_rag_query(
-            job_description_text=session.job_description_text or "",
-            role_title=session.role_title or _extract_role_title(session.job_description_text or ""),
-            question_prompt=question.prompt,
-        ),
-        top_k=4,
+    result = await _post_orchestrator_action(
+        action="request_help",
+        session_id=session_id,
+        help_kind="hint",
+        ui_context={"current_surface": "question_stage", "voice_enabled": False, "editor_enabled": session.current_stage == "coding"},
     )
-    content = await _generate_ai_help("hint", session, question, company_context=company_context)
-    return InterviewHelpResponse(question_id=question.id, content=content)
+    content = str(result.get("support_content") or result.get("interviewer_output") or "").strip()
+    question = session.questions[session.current_question_index] if session.current_question_index < len(session.questions) else None
+    return InterviewHelpResponse(question_id=question.id if question else "coding-support", content=content)
 
 
 @app.post("/api/interviews/{session_id}/model-answer", response_model=InterviewHelpResponse)
@@ -1804,22 +1940,192 @@ async def get_question_model_answer(
     session = await repo.get_interview_session(session_id, current_user.id)
     if session is None:
         raise fastapi.HTTPException(status_code=404, detail="Interview not found")
-    if session.is_completed or session.current_question_index >= len(session.questions):
+    if session.is_completed:
         raise fastapi.HTTPException(status_code=400, detail="No active question available")
-
-    question = session.questions[session.current_question_index]
-    company_context = await _retrieve_company_context_text(
-        company_id=session.company_id,
-        company_name=session.company_name,
-        query=_build_company_rag_query(
-            job_description_text=session.job_description_text or "",
-            role_title=session.role_title or _extract_role_title(session.job_description_text or ""),
-            question_prompt=question.prompt,
-        ),
-        top_k=4,
+    result = await _post_orchestrator_action(
+        action="request_help",
+        session_id=session_id,
+        help_kind="model_answer",
+        ui_context={"current_surface": "question_stage", "voice_enabled": False, "editor_enabled": session.current_stage == "coding"},
     )
-    content = await _generate_ai_help("model_answer", session, question, company_context=company_context)
-    return InterviewHelpResponse(question_id=question.id, content=content)
+    content = str(result.get("support_content") or result.get("interviewer_output") or "").strip()
+    question = session.questions[session.current_question_index] if session.current_question_index < len(session.questions) else None
+    return InterviewHelpResponse(question_id=question.id if question else "coding-support", content=content)
+
+
+async def _save_runtime_session(session: InterviewSessionModel) -> InterviewSessionModel:
+    return await repo.add_interview_session(session)
+
+
+async def _require_runtime_session(session_id: UUID) -> InterviewSessionModel:
+    session = await repo.get_interview_session(session_id)
+    if session is None:
+        raise fastapi.HTTPException(status_code=404, detail="Session not found")
+    return session
+
+
+@app.get("/api/interview-data/runtime/sessions/{session_id}", response_model=InterviewSessionModel | None)
+async def get_runtime_session(session_id: UUID):
+    return await repo.get_interview_session(session_id)
+
+
+@app.post("/api/interview-data/runtime/sessions", response_model=InterviewSessionModel)
+async def create_runtime_session(payload: InterviewSessionRecordRequest):
+    return await repo.add_interview_session(payload.record)
+
+
+@app.post("/api/interview-data/runtime/sessions/{session_id}/turns", response_model=InterviewSessionModel)
+async def append_runtime_turn(session_id: UUID, payload: RuntimeTurnRequest):
+    session = await _require_runtime_session(session_id)
+    updated = _append_runtime_turn(session, payload.turn)
+    return await _save_runtime_session(updated)
+
+
+@app.post("/api/interview-data/runtime/sessions/{session_id}/active-agent", response_model=InterviewSessionModel)
+async def set_runtime_active_agent(session_id: UUID, payload: RuntimeActiveAgentRequest):
+    session = await _require_runtime_session(session_id)
+    updated = session.model_copy(update={"active_agent": payload.active_agent})
+    return await _save_runtime_session(updated)
+
+
+@app.post("/api/interview-data/runtime/sessions/{session_id}/handoffs", response_model=InterviewSessionModel)
+async def record_runtime_handoff(session_id: UUID, payload: RuntimeHandoffRequest):
+    session = await _require_runtime_session(session_id)
+    updated = _append_handoff_trace(session, payload.handoff)
+    return await _save_runtime_session(updated)
+
+
+@app.post("/api/interview-data/runtime/sessions/{session_id}/decision-trace", response_model=InterviewSessionModel)
+async def append_runtime_decision_trace(session_id: UUID, payload: RuntimeDecisionTraceRequest):
+    session = await _require_runtime_session(session_id)
+    updated = _append_decision_trace(session, payload.decision)
+    return await _save_runtime_session(updated)
+
+
+@app.post("/api/interview-data/runtime/sessions/{session_id}/stage", response_model=InterviewSessionModel)
+async def transition_runtime_stage(session_id: UUID, payload: RuntimeStageTransitionRequest):
+    session = await _require_runtime_session(session_id)
+    current_prompt = payload.prompt
+    current_question_index = session.current_question_index
+    if payload.stage in {"coding", "completed"}:
+        current_prompt = None
+        current_question_index = len(session.questions)
+    updated = session.model_copy(
+        update={
+            "current_stage": payload.stage,
+            "current_prompt": current_prompt,
+            "current_question_index": current_question_index,
+            "completed_at": utcnow() if payload.stage == "completed" else session.completed_at,
+            "is_completed": payload.stage == "completed" or session.is_completed,
+        }
+    )
+    if payload.reason.strip():
+        updated = _append_runtime_turn(
+            updated,
+            InterviewRuntimeTurnModel(
+                stage=session.current_stage,
+                role="system",
+                agent_name="interview_orchestrator_agent",
+                kind="transition",
+                content=payload.reason.strip(),
+                metadata={"next_stage": payload.stage},
+            ),
+        )
+    return await _save_runtime_session(updated)
+
+
+@app.post("/api/interview-data/runtime/sessions/{session_id}/prompt", response_model=InterviewSessionModel)
+async def save_runtime_stage_prompt(session_id: UUID, payload: RuntimePromptRequest):
+    session = await _require_runtime_session(session_id)
+    updated = session.model_copy(update={"current_prompt": payload.prompt})
+    return await _save_runtime_session(updated)
+
+
+@app.post("/api/interview-data/runtime/sessions/{session_id}/support", response_model=InterviewSessionModel)
+async def save_runtime_support(session_id: UUID, payload: RuntimeSupportRequest):
+    session = await _require_runtime_session(session_id)
+    updated = _append_support_entry(session, payload.entry)
+    return await _save_runtime_session(updated)
+
+
+@app.post("/api/interview-data/runtime/sessions/{session_id}/coding/problem", response_model=InterviewSessionModel)
+async def save_runtime_coding_problem(session_id: UUID, payload: RuntimeCodingProblemRequest):
+    session = await _require_runtime_session(session_id)
+    updated = session.model_copy(
+        update={
+            "coding_round": payload.coding_round,
+            "current_stage": "coding",
+            "current_prompt": None,
+            "current_question_index": len(session.questions),
+        }
+    )
+    return await _save_runtime_session(updated)
+
+
+@app.post("/api/interview-data/runtime/sessions/{session_id}/coding/events", response_model=InterviewSessionModel)
+async def append_runtime_coding_event(session_id: UUID, payload: RuntimeCodingEventRequest):
+    session = await _require_runtime_session(session_id)
+    if session.coding_round is None:
+        raise fastapi.HTTPException(status_code=400, detail="Coding round not initialized")
+    updated_round = _append_coding_round_state(
+        session.coding_round,
+        event=payload.event,
+        code=payload.code,
+        language=payload.language,
+        transcript_append=payload.transcript_append,
+    )
+    updated = session.model_copy(update={"coding_round": updated_round})
+    return await _save_runtime_session(updated)
+
+
+@app.post("/api/interview-data/runtime/sessions/{session_id}/coding/messages", response_model=InterviewSessionModel)
+async def append_runtime_coding_message(session_id: UUID, payload: RuntimeCodingMessageRequest):
+    session = await _require_runtime_session(session_id)
+    if session.coding_round is None:
+        raise fastapi.HTTPException(status_code=400, detail="Coding round not initialized")
+    updated_round = session.coding_round.model_copy(
+        update={"conversation": [*session.coding_round.conversation, payload.turn]}
+    )
+    updated = session.model_copy(update={"coding_round": updated_round})
+    return await _save_runtime_session(updated)
+
+
+@app.post("/api/interview-data/runtime/sessions/{session_id}/evaluation", response_model=InterviewSessionModel)
+async def save_runtime_evaluation(session_id: UUID, payload: RuntimeFinalEvaluationRequest):
+    session = await _require_runtime_session(session_id)
+    updated_round = session.coding_round
+    if updated_round is not None and payload.report and payload.report.coding_evaluation is not None:
+        updated_round = updated_round.model_copy(update={"evaluation": payload.report.coding_evaluation})
+    updated = session.model_copy(
+        update={
+            "evaluation": payload.evaluation,
+            "score": payload.evaluation.overall_score,
+            "report": payload.report or session.report,
+            "coding_round": updated_round,
+        }
+    )
+    return await _save_runtime_session(updated)
+
+
+@app.post("/api/interview-data/runtime/sessions/{session_id}/complete", response_model=InterviewSessionModel)
+async def complete_runtime_session(session_id: UUID, payload: RuntimeCompleteSessionRequest):
+    session = await _require_runtime_session(session_id)
+    updated_round = session.coding_round
+    if updated_round is not None:
+        updated_round = updated_round.model_copy(update={"completed_at": utcnow()})
+    updated = session.model_copy(
+        update={
+            "report": payload.report,
+            "evaluation": payload.evaluation or session.evaluation,
+            "score": payload.evaluation.overall_score if payload.evaluation else session.score,
+            "coding_round": updated_round,
+            "is_completed": True,
+            "current_stage": "completed",
+            "current_prompt": None,
+            "completed_at": utcnow(),
+        }
+    )
+    return await _save_runtime_session(updated)
 
 
 @app.get("/api/interview-data/sessions/{session_id}", response_model=InterviewSessionModel)

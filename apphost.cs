@@ -31,7 +31,6 @@ var mcpInterviewData = builder.AddUvicornApp(
         app: "main:app")
     .WithUv()
     .WithExternalHttpEndpoints()
-    .WithEnvironment("BACKEND_URL", "http://127.0.0.1:8002")
     .WithHttpHealthCheck("/health");
 
 var agent = builder.AddUvicornApp(
@@ -59,6 +58,7 @@ var backend = builder.AddUvicornApp("backend", "./src/backend", "main:app")
     .WithHttpHealthCheck("/health");
 
 agent.WithReference(backend);
+mcpInterviewData.WithReference(backend);
 
 var frontend = builder.AddViteApp("frontend", "./src/frontend")
     .WithExternalHttpEndpoints()
