@@ -1843,6 +1843,22 @@ async def search_problem_catalog_endpoint(payload: ProblemCatalogSearchRequest):
         raise fastapi.HTTPException(status_code=502, detail=f"Unable to search problem catalog: {exc}") from exc
 
 
+@app.get("/api/internal/coding-problems", response_model=list[CodingProblemModel])
+async def list_internal_coding_problems(
+    company: str | None = None,
+    difficulty: str | None = None,
+):
+    problems = await repo.list_coding_problems()
+    company_filter = (company or "").strip().lower()
+    difficulty_filter = (difficulty or "").strip().lower()
+
+    if company_filter:
+        problems = [problem for problem in problems if problem.company.strip().lower() == company_filter]
+    if difficulty_filter:
+        problems = [problem for problem in problems if problem.difficulty.strip().lower() == difficulty_filter]
+    return problems
+
+
 @app.get("/api/internal/coding-problems/{problem_id}", response_model=CodingProblemModel)
 async def get_internal_coding_problem(problem_id: str):
     problem = await repo.get_coding_problem(problem_id)

@@ -1,0 +1,117 @@
+[
+  {
+    "id": "amazon-reorder-logs",
+    "title": "Reorder Log Files",
+    "company": "Amazon",
+    "difficulty": "easy",
+    "prompt": "You are given an array of log strings. Each log has an identifier followed by words or numbers. Reorder the logs so that all letter-logs come before digit-logs, letter-logs are sorted lexicographically by content then identifier, and digit-logs keep their original order.",
+    "constraints": [
+      "1 <= logs.length <= 1000",
+      "3 <= logs[i].length <= 100"
+    ],
+    "examples": [
+      {
+        "input": "logs = [\"dig1 8 1 5 1\",\"let1 art can\",\"dig2 3 6\",\"let2 own kit dig\",\"let3 art zero\"]",
+        "output": "[\"let1 art can\",\"let3 art zero\",\"let2 own kit dig\",\"dig1 8 1 5 1\",\"dig2 3 6\"]"
+      }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "reorderLogFiles",
+      "typescript_params": "logs: string[]",
+      "python_params": "logs: list[str]",
+      "java_signature": "String[] reorderLogFiles(String[] logs)",
+      "csharp_signature": "string[] ReorderLogFiles(string[] logs)"
+    },
+    "expected_topics": ["custom sorting", "string parsing", "stable ordering"],
+    "style_tags": ["customer data", "sorting rules", "stable processing"],
+    "complexity_target": "Parse each log once and use sorting only where needed for letter-logs.",
+    "edge_case_hints": ["all digit logs", "all letter logs", "same content different identifiers"]
+  },
+  {
+    "id": "amazon-top-k-frequent",
+    "title": "Top K Frequent Items",
+    "company": "Amazon",
+    "difficulty": "medium",
+    "prompt": "Given an integer array nums and an integer k, return the k most frequent values. The order of the result does not matter.",
+    "constraints": [
+      "1 <= nums.length <= 100000",
+      "k is in the range [1, number of unique values]"
+    ],
+    "examples": [
+      { "input": "nums = [1,1,1,2,2,3], k = 2", "output": "[1,2]" },
+      { "input": "nums = [1], k = 1", "output": "[1]" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "topKFrequent",
+      "typescript_params": "nums: number[], k: number",
+      "python_params": "nums: list[int], k: int",
+      "java_signature": "int[] topKFrequent(int[] nums, int k)",
+      "csharp_signature": "int[] TopKFrequent(int[] nums, int k)"
+    },
+    "expected_topics": ["hash map", "bucket sort or heap", "frequency counting"],
+    "style_tags": ["ranking", "aggregation", "throughput", "tradeoffs"],
+    "complexity_target": "Avoid repeatedly sorting the full array of frequencies if possible.",
+    "edge_case_hints": ["all values unique", "k equals unique count", "negative numbers"]
+  },
+  {
+    "id": "amazon-search-suggestions",
+    "title": "Search Suggestions System",
+    "company": "Amazon",
+    "difficulty": "medium",
+    "prompt": "Given a list of product names and a search word, return up to three product suggestions after each character of the search word is typed. Suggestions must share the typed prefix and be returned in lexicographic order.",
+    "constraints": [
+      "1 <= products.length <= 1000",
+      "1 <= products[i].length <= 3000",
+      "All strings contain lowercase English letters"
+    ],
+    "examples": [
+      {
+        "input": "products = [\"mobile\",\"mouse\",\"moneypot\",\"monitor\",\"mousepad\"], searchWord = \"mouse\"",
+        "output": "[[\"mobile\",\"moneypot\",\"monitor\"],[\"mobile\",\"moneypot\",\"monitor\"],[\"mouse\",\"mousepad\"],[\"mouse\",\"mousepad\"],[\"mouse\",\"mousepad\"]]"
+      }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "suggestedProducts",
+      "typescript_params": "products: string[], searchWord: string",
+      "python_params": "products: list[str], searchWord: str",
+      "java_signature": "List<List<String>> suggestedProducts(String[] products, String searchWord)",
+      "csharp_signature": "IList<IList<string>> SuggestedProducts(string[] products, string searchWord)"
+    },
+    "expected_topics": ["sorting", "binary search", "prefix matching"],
+    "style_tags": ["catalog", "customer search", "ranking", "incremental filtering"],
+    "complexity_target": "Avoid scanning the full product list from scratch for every prefix if possible.",
+    "edge_case_hints": ["no matching prefix", "duplicate-looking prefixes", "short search word"]
+  },
+  {
+    "id": "amazon-word-ladder",
+    "title": "Word Ladder",
+    "company": "Amazon",
+    "difficulty": "hard",
+    "prompt": "Given two words beginWord and endWord and a dictionary wordList, return the length of the shortest transformation sequence from beginWord to endWord. Only one letter may change at a time, and each transformed word must exist in the dictionary.",
+    "constraints": [
+      "1 <= beginWord.length <= 10",
+      "1 <= wordList.length <= 5000"
+    ],
+    "examples": [
+      {
+        "input": "beginWord = \"hit\", endWord = \"cog\", wordList = [\"hot\",\"dot\",\"dog\",\"lot\",\"log\",\"cog\"]",
+        "output": "5"
+      }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "ladderLength",
+      "typescript_params": "beginWord: string, endWord: string, wordList: string[]",
+      "python_params": "beginWord: str, endWord: str, wordList: list[str]",
+      "java_signature": "int ladderLength(String beginWord, String endWord, List<String> wordList)",
+      "csharp_signature": "int LadderLength(string beginWord, string endWord, IList<string> wordList)"
+    },
+    "expected_topics": ["bfs", "graph modeling", "pattern hashing"],
+    "style_tags": ["search", "transformation graph", "shortest path"],
+    "complexity_target": "Use BFS and avoid comparing every word against every other word directly.",
+    "edge_case_hints": ["end word missing", "begin equals end", "disconnected graph"]
+  }
+]

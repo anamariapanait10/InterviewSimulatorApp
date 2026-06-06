@@ -1,0 +1,91 @@
+[
+  {
+    "id": "datadog-valid-anagram",
+    "title": "Valid Anagram",
+    "company": "Datadog",
+    "difficulty": "easy",
+    "prompt": "Given two strings s and t, return true if t is an anagram of s, and false otherwise.",
+    "constraints": [
+      "1 <= s.length, t.length <= 50000",
+      "s and t consist of lowercase English letters"
+    ],
+    "examples": [
+      { "input": "s = \"anagram\", t = \"nagaram\"", "output": "true" },
+      { "input": "s = \"rat\", t = \"car\"", "output": "false" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "isAnagram",
+      "typescript_params": "s: string, t: string",
+      "python_params": "s: str, t: str",
+      "java_signature": "boolean isAnagram(String s, String t)",
+      "csharp_signature": "bool IsAnagram(string s, string t)"
+    },
+    "expected_topics": ["hash map", "frequency counting", "string scan"],
+    "style_tags": ["text signals", "comparison", "counting"],
+    "complexity_target": "Solve in linear time with respect to input size.",
+    "edge_case_hints": ["different lengths", "same string", "repeated letters"]
+  },
+  {
+    "id": "datadog-time-map",
+    "title": "Time Based Key Value Store",
+    "company": "Datadog",
+    "difficulty": "medium",
+    "prompt": "Design a data structure that supports setting a value for a key at a timestamp and getting the most recent value for that key at or before a target timestamp.",
+    "constraints": [
+      "Calls to set for the same key arrive in strictly increasing timestamp order",
+      "Up to 200000 operations"
+    ],
+    "examples": [
+      {
+        "input": "set(\"foo\",\"bar\",1), get(\"foo\",1), get(\"foo\",3)",
+        "output": "\"bar\", \"bar\""
+      },
+      {
+        "input": "set(\"foo\",\"bar2\",4), get(\"foo\",4), get(\"foo\",5)",
+        "output": "\"bar2\", \"bar2\""
+      }
+    ],
+    "starter_template": {
+      "kind": "class",
+      "typescript": "export class TimeMap {\n  set(key: string, value: string, timestamp: number): void {\n    // Explain your thinking as you code.\n  }\n\n  get(key: string, timestamp: number): string {\n    return \"\"\n  }\n}\n",
+      "javascript": "export class TimeMap {\n  set(key, value, timestamp) {\n    // Explain your thinking as you code.\n  }\n\n  get(key, timestamp) {\n    return \"\"\n  }\n}\n",
+      "python": "class TimeMap:\n    def __init__(self):\n        # Explain your thinking as you code.\n        pass\n\n    def set(self, key: str, value: str, timestamp: int) -> None:\n        pass\n\n    def get(self, key: str, timestamp: int) -> str:\n        return \"\"\n",
+      "java": "class TimeMap {\n    public TimeMap() {}\n\n    public void set(String key, String value, int timestamp) {\n        // Explain your thinking as you code.\n    }\n\n    public String get(String key, int timestamp) {\n        return \"\";\n    }\n}\n",
+      "csharp": "public class TimeMap\n{\n    public TimeMap() {}\n\n    public void Set(string key, string value, int timestamp)\n    {\n        // Explain your thinking as you code.\n    }\n\n    public string Get(string key, int timestamp)\n    {\n        return \"\";\n    }\n}\n"
+    },
+    "expected_topics": ["binary search", "hash map", "append-only lists"],
+    "style_tags": ["observability", "history lookup", "query efficiency", "design interview bridge"],
+    "complexity_target": "set should be efficient, and get should avoid scanning the whole history.",
+    "edge_case_hints": ["key not found", "timestamp before first value", "timestamp after latest value"]
+  },
+  {
+    "id": "datadog-sliding-window-median",
+    "title": "Sliding Window Median",
+    "company": "Datadog",
+    "difficulty": "hard",
+    "prompt": "You are given an integer array nums and an integer k. Return the median for every contiguous subarray of size k.",
+    "constraints": [
+      "1 <= nums.length <= 100000",
+      "1 <= k <= nums.length"
+    ],
+    "examples": [
+      {
+        "input": "nums = [1,3,-1,-3,5,3,6,7], k = 3",
+        "output": "[1,-1,-1,3,5,6]"
+      }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "medianSlidingWindow",
+      "typescript_params": "nums: number[], k: number",
+      "python_params": "nums: list[int], k: int",
+      "java_signature": "double[] medianSlidingWindow(int[] nums, int k)",
+      "csharp_signature": "double[] MedianSlidingWindow(int[] nums, int k)"
+    },
+    "expected_topics": ["heap", "balanced partition", "lazy deletion"],
+    "style_tags": ["time series", "window analytics", "online statistics"],
+    "complexity_target": "Avoid sorting every window from scratch.",
+    "edge_case_hints": ["even-sized window", "duplicates", "negative values"]
+  }
+]

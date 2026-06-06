@@ -1,0 +1,85 @@
+[
+  {
+    "id": "uber-logger-rate-limiter",
+    "title": "Logger Rate Limiter",
+    "company": "Uber",
+    "difficulty": "easy",
+    "prompt": "Design a logger system that receives messages with timestamps. Each message should be printed only if it was not printed in the last 10 seconds.",
+    "constraints": [
+      "0 <= timestamp <= 10^9",
+      "At most 100000 calls"
+    ],
+    "examples": [
+      {
+        "input": "shouldPrintMessage(1, \"foo\"), shouldPrintMessage(2, \"bar\"), shouldPrintMessage(3, \"foo\"), shouldPrintMessage(11, \"foo\")",
+        "output": "true, true, false, true"
+      }
+    ],
+    "starter_template": {
+      "kind": "class",
+      "typescript": "export class Logger {\n  shouldPrintMessage(timestamp: number, message: string): boolean {\n    // Explain your thinking as you code.\n    return false\n  }\n}\n",
+      "javascript": "export class Logger {\n  shouldPrintMessage(timestamp, message) {\n    // Explain your thinking as you code.\n    return false\n  }\n}\n",
+      "python": "class Logger:\n    def shouldPrintMessage(self, timestamp: int, message: str) -> bool:\n        # Explain your thinking as you code.\n        return False\n",
+      "java": "class Logger {\n    public boolean shouldPrintMessage(int timestamp, String message) {\n        // Explain your thinking as you code.\n        return false;\n    }\n}\n",
+      "csharp": "public class Logger\n{\n    public bool ShouldPrintMessage(int timestamp, string message)\n    {\n        // Explain your thinking as you code.\n        return false;\n    }\n}\n"
+    },
+    "expected_topics": ["hash map", "timestamp tracking"],
+    "style_tags": ["event stream", "rate limiting", "stateful design"],
+    "complexity_target": "Track only the last printed timestamp per message.",
+    "edge_case_hints": ["same message repeated quickly", "different messages", "large timestamp gaps"]
+  },
+  {
+    "id": "uber-car-pooling",
+    "title": "Car Pooling",
+    "company": "Uber",
+    "difficulty": "medium",
+    "prompt": "You are driving a vehicle with a fixed capacity. Given a list of trips where each trip is [numPassengers, from, to], return true if it is possible to complete all trips without exceeding capacity.",
+    "constraints": [
+      "1 <= trips.length <= 1000",
+      "0 <= from < to <= 1000"
+    ],
+    "examples": [
+      { "input": "trips = [[2,1,5],[3,3,7]], capacity = 4", "output": "false" },
+      { "input": "trips = [[2,1,5],[3,3,7]], capacity = 5", "output": "true" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "carPooling",
+      "typescript_params": "trips: number[][], capacity: number",
+      "python_params": "trips: list[list[int]], capacity: int",
+      "java_signature": "boolean carPooling(int[][] trips, int capacity)",
+      "csharp_signature": "bool CarPooling(int[][] trips, int capacity)"
+    },
+    "expected_topics": ["difference array", "sweep line", "capacity tracking"],
+    "style_tags": ["transportation", "timelines", "resource constraints"],
+    "complexity_target": "Use event-based accumulation rather than checking each trip against every other one.",
+    "edge_case_hints": ["drop-off and pickup at same point", "single trip", "capacity exactly met"]
+  },
+  {
+    "id": "uber-alien-dictionary",
+    "title": "Alien Dictionary Order",
+    "company": "Uber",
+    "difficulty": "hard",
+    "prompt": "You are given a sorted list of words from an unknown alphabet. Infer one valid character ordering. Return an empty string if the ordering is invalid.",
+    "constraints": [
+      "1 <= words.length <= 100",
+      "1 <= words[i].length <= 100"
+    ],
+    "examples": [
+      { "input": "words = [\"wrt\",\"wrf\",\"er\",\"ett\",\"rftt\"]", "output": "\"wertf\"" },
+      { "input": "words = [\"z\",\"x\",\"z\"]", "output": "\"\"" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "alienOrder",
+      "typescript_params": "words: string[]",
+      "python_params": "words: list[str]",
+      "java_signature": "String alienOrder(String[] words)",
+      "csharp_signature": "string AlienOrder(string[] words)"
+    },
+    "expected_topics": ["graph", "topological sort", "cycle detection"],
+    "style_tags": ["dependency reasoning", "ordering constraints", "invalid state detection"],
+    "complexity_target": "Build only the necessary graph edges and detect invalid prefixes early.",
+    "edge_case_hints": ["prefix conflict", "disconnected letters", "cycle in dependencies"]
+  }
+]

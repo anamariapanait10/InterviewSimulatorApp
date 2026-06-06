@@ -283,6 +283,7 @@ export default function InterviewSetupPage() {
   const handleFileParse = async (
     file: File | undefined,
     setter: Dispatch<SetStateAction<ParsedSourceState>>,
+    options?: { detectTargetCompany?: boolean },
   ) => {
     if (!file) {
       return
@@ -300,7 +301,9 @@ export default function InterviewSetupPage() {
         isParsing: false,
         importedFrom: null,
       }))
-      applyDetectedCompany(inferCompanyFromJobDescription(parsed.extracted_text))
+      if (options?.detectTargetCompany) {
+        applyDetectedCompany(inferCompanyFromJobDescription(parsed.extracted_text))
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to parse document'
       setError(message)
@@ -420,7 +423,9 @@ export default function InterviewSetupPage() {
             setJobDescription((previous) => ({ ...previous, text, fileName: null, importedFrom: null }))
             applyDetectedCompany(inferCompanyFromJobDescription(text))
           }}
-          onFileChange={(event) => void handleFileParse(event.target.files?.[0], setJobDescription)}
+          onFileChange={(event) =>
+            void handleFileParse(event.target.files?.[0], setJobDescription, { detectTargetCompany: true })
+          }
           onLinkChange={(text) =>
             setJobDescription((previous) => ({
               ...previous,

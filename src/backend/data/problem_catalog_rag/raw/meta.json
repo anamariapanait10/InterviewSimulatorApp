@@ -1,0 +1,115 @@
+[
+  {
+    "id": "meta-valid-palindrome",
+    "title": "Valid Palindrome",
+    "company": "Meta",
+    "difficulty": "easy",
+    "prompt": "Given a string s, return true if it is a palindrome after converting uppercase letters to lowercase and removing all non-alphanumeric characters.",
+    "constraints": [
+      "1 <= s.length <= 200000"
+    ],
+    "examples": [
+      { "input": "s = \"A man, a plan, a canal: Panama\"", "output": "true" },
+      { "input": "s = \"race a car\"", "output": "false" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "isPalindrome",
+      "typescript_params": "s: string",
+      "python_params": "s: str",
+      "java_signature": "boolean isPalindrome(String s)",
+      "csharp_signature": "bool IsPalindrome(string s)"
+    },
+    "expected_topics": ["two pointers", "string normalization"],
+    "style_tags": ["text cleanup", "pointer reasoning"],
+    "complexity_target": "Process the string in linear time.",
+    "edge_case_hints": ["empty after filtering", "numbers", "mixed punctuation"]
+  },
+  {
+    "id": "meta-merge-intervals",
+    "title": "Merge Busy Windows",
+    "company": "Meta",
+    "difficulty": "medium",
+    "prompt": "You are given a list of closed intervals where each interval represents a busy time window. Merge all overlapping intervals and return the condensed list sorted by start time.",
+    "constraints": [
+      "1 <= intervals.length <= 100000",
+      "0 <= start <= end <= 1000000"
+    ],
+    "examples": [
+      {
+        "input": "intervals = [[1,3],[2,6],[8,10],[15,18]]",
+        "output": "[[1,6],[8,10],[15,18]]"
+      },
+      {
+        "input": "intervals = [[1,4],[4,5]]",
+        "output": "[[1,5]]"
+      }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "mergeIntervals",
+      "typescript_params": "intervals: number[][]",
+      "python_params": "intervals: list[list[int]]",
+      "java_signature": "int[][] mergeIntervals(int[][] intervals)",
+      "csharp_signature": "int[][] MergeIntervals(int[][] intervals)"
+    },
+    "expected_topics": ["sorting", "interval sweep", "array traversal"],
+    "style_tags": ["data cleanup", "ordered processing", "state carryover"],
+    "complexity_target": "Expect O(n log n) time because sorting is usually required.",
+    "edge_case_hints": ["single interval", "touching endpoints", "already sorted input"]
+  },
+  {
+    "id": "meta-accounts-merge",
+    "title": "Accounts Merge",
+    "company": "Meta",
+    "difficulty": "medium",
+    "prompt": "Given a list of accounts where each account contains a name followed by email addresses, merge accounts that belong to the same person. Two accounts belong to the same person if they share at least one email.",
+    "constraints": [
+      "1 <= accounts.length <= 1000",
+      "1 <= accounts[i].length <= 10"
+    ],
+    "examples": [
+      {
+        "input": "accounts = [[\"John\",\"johnsmith@mail.com\",\"john_newyork@mail.com\"],[\"John\",\"johnsmith@mail.com\",\"john00@mail.com\"],[\"Mary\",\"mary@mail.com\"],[\"John\",\"johnnybravo@mail.com\"]]",
+        "output": "[[\"John\",\"john00@mail.com\",\"john_newyork@mail.com\",\"johnsmith@mail.com\"],[\"Mary\",\"mary@mail.com\"],[\"John\",\"johnnybravo@mail.com\"]]"
+      }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "accountsMerge",
+      "typescript_params": "accounts: string[][]",
+      "python_params": "accounts: list[list[str]]",
+      "java_signature": "List<List<String>> accountsMerge(List<List<String>> accounts)",
+      "csharp_signature": "IList<IList<string>> AccountsMerge(IList<IList<string>> accounts)"
+    },
+    "expected_topics": ["graph", "union find", "connected components"],
+    "style_tags": ["identity resolution", "graph modeling", "deduplication"],
+    "complexity_target": "Model shared emails efficiently and avoid repeated scans of all accounts.",
+    "edge_case_hints": ["same name different people", "single-email accounts", "all accounts connected"]
+  },
+  {
+    "id": "meta-minimum-window-substring",
+    "title": "Minimum Window Substring",
+    "company": "Meta",
+    "difficulty": "hard",
+    "prompt": "Given two strings s and t, return the minimum window substring of s such that every character in t is included in the window with multiplicity. Return an empty string if no such window exists.",
+    "constraints": [
+      "1 <= s.length, t.length <= 100000"
+    ],
+    "examples": [
+      { "input": "s = \"ADOBECODEBANC\", t = \"ABC\"", "output": "\"BANC\"" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "minWindow",
+      "typescript_params": "s: string, t: string",
+      "python_params": "s: str, t: str",
+      "java_signature": "String minWindow(String s, String t)",
+      "csharp_signature": "string MinWindow(string s, string t)"
+    },
+    "expected_topics": ["sliding window", "frequency map", "window shrinking"],
+    "style_tags": ["strings", "coverage constraints", "optimization"],
+    "complexity_target": "Use a linear sliding-window approach rather than rechecking every substring.",
+    "edge_case_hints": ["t longer than s", "duplicate required chars", "no valid window"]
+  }
+]

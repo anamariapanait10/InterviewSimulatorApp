@@ -1,0 +1,113 @@
+[
+  {
+    "id": "microsoft-valid-parentheses",
+    "title": "Valid Parentheses",
+    "company": "Microsoft",
+    "difficulty": "easy",
+    "prompt": "Given a string containing just the characters '(', ')', '{', '}', '[' and ']', determine if the input string is valid.",
+    "constraints": [
+      "1 <= s.length <= 10000"
+    ],
+    "examples": [
+      { "input": "s = \"()[]{}\"", "output": "true" },
+      { "input": "s = \"(]\"", "output": "false" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "isValid",
+      "typescript_params": "s: string",
+      "python_params": "s: str",
+      "java_signature": "boolean isValid(String s)",
+      "csharp_signature": "bool IsValid(string s)"
+    },
+    "expected_topics": ["stack", "matching pairs"],
+    "style_tags": ["syntax validation", "state tracking"],
+    "complexity_target": "Use linear time and a stack-like structure.",
+    "edge_case_hints": ["odd length", "closing before opening", "nested pairs"]
+  },
+  {
+    "id": "microsoft-course-schedule",
+    "title": "Course Schedule",
+    "company": "Microsoft",
+    "difficulty": "medium",
+    "prompt": "There are numCourses courses you have to finish, labeled from 0 to numCourses - 1. Given prerequisite pairs, return true if you can finish all courses.",
+    "constraints": [
+      "1 <= numCourses <= 2000",
+      "0 <= prerequisites.length <= 5000"
+    ],
+    "examples": [
+      { "input": "numCourses = 2, prerequisites = [[1,0]]", "output": "true" },
+      { "input": "numCourses = 2, prerequisites = [[1,0],[0,1]]", "output": "false" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "canFinish",
+      "typescript_params": "numCourses: number, prerequisites: number[][]",
+      "python_params": "numCourses: int, prerequisites: list[list[int]]",
+      "java_signature": "boolean canFinish(int numCourses, int[][] prerequisites)",
+      "csharp_signature": "bool CanFinish(int numCourses, int[][] prerequisites)"
+    },
+    "expected_topics": ["graph", "topological sort", "cycle detection"],
+    "style_tags": ["dependency graph", "planning", "validity check"],
+    "complexity_target": "Aim for O(V + E) time using indegrees or DFS cycle detection.",
+    "edge_case_hints": ["no prerequisites", "self-cycle", "disconnected graph"]
+  },
+  {
+    "id": "microsoft-clone-graph",
+    "title": "Clone Graph",
+    "company": "Microsoft",
+    "difficulty": "medium",
+    "prompt": "Given a reference of a node in a connected undirected graph, return a deep copy of the graph.",
+    "constraints": [
+      "The number of nodes is in the range [0, 100]",
+      "Each node's value is unique"
+    ],
+    "examples": [
+      {
+        "input": "adjList = [[2,4],[1,3],[2,4],[1,3]]",
+        "output": "A deep copy with the same adjacency relationships"
+      },
+      { "input": "adjList = [[]]", "output": "Single cloned node" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "cloneGraph",
+      "typescript_params": "node: Node | null",
+      "python_params": "node: 'Node | None'",
+      "java_signature": "Node cloneGraph(Node node)",
+      "csharp_signature": "Node CloneGraph(Node node)"
+    },
+    "expected_topics": ["graph traversal", "hash map", "dfs or bfs"],
+    "style_tags": ["object graph", "deep copy", "reference handling"],
+    "complexity_target": "Visit each node once and memoize already-cloned nodes.",
+    "edge_case_hints": ["null input", "single node", "cycle in the graph"]
+  },
+  {
+    "id": "microsoft-serialize-deserialize-tree",
+    "title": "Serialize and Deserialize Binary Tree",
+    "company": "Microsoft",
+    "difficulty": "hard",
+    "prompt": "Design an algorithm to serialize a binary tree to a string and deserialize the string back to the original tree structure.",
+    "constraints": [
+      "The number of nodes is in the range [0, 10000]"
+    ],
+    "examples": [
+      {
+        "input": "root = [1,2,3,null,null,4,5]",
+        "output": "Serialization and deserialization preserve the same tree"
+      }
+    ],
+    "starter_template": {
+      "kind": "class",
+      "typescript": "export class Codec {\n  serialize(root: TreeNode | null): string {\n    // Explain your thinking as you code.\n    return \"\"\n  }\n\n  deserialize(data: string): TreeNode | null {\n    return null\n  }\n}\n",
+      "javascript": "export class Codec {\n  serialize(root) {\n    // Explain your thinking as you code.\n    return \"\"\n  }\n\n  deserialize(data) {\n    return null\n  }\n}\n",
+      "python": "class Codec:\n    def serialize(self, root):\n        # Explain your thinking as you code.\n        return \"\"\n\n    def deserialize(self, data):\n        return None\n",
+      "java": "public class Codec {\n    public String serialize(TreeNode root) {\n        // Explain your thinking as you code.\n        return \"\";\n    }\n\n    public TreeNode deserialize(String data) {\n        return null;\n    }\n}\n",
+      "csharp": "public class Codec\n{\n    public string Serialize(TreeNode root)\n    {\n        // Explain your thinking as you code.\n        return \"\";\n    }\n\n    public TreeNode Deserialize(string data)\n    {\n        return null;\n    }\n}\n"
+    },
+    "expected_topics": ["tree traversal", "queue or recursion", "encoding format"],
+    "style_tags": ["system design flavor", "state encoding", "tree reconstruction"],
+    "complexity_target": "Use a representation that can be parsed in linear time.",
+    "edge_case_hints": ["empty tree", "skewed tree", "null children positions"]
+  }
+]

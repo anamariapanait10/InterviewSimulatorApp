@@ -1,0 +1,112 @@
+[
+  {
+    "id": "stripe-contains-duplicate",
+    "title": "Contains Duplicate",
+    "company": "Stripe",
+    "difficulty": "easy",
+    "prompt": "Given an integer array nums, return true if any value appears at least twice in the array, and return false if every element is distinct.",
+    "constraints": [
+      "1 <= nums.length <= 100000"
+    ],
+    "examples": [
+      { "input": "nums = [1,2,3,1]", "output": "true" },
+      { "input": "nums = [1,2,3,4]", "output": "false" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "containsDuplicate",
+      "typescript_params": "nums: number[]",
+      "python_params": "nums: list[int]",
+      "java_signature": "boolean containsDuplicate(int[] nums)",
+      "csharp_signature": "bool ContainsDuplicate(int[] nums)"
+    },
+    "expected_topics": ["hash set", "array scan"],
+    "style_tags": ["data validation", "integrity checks"],
+    "complexity_target": "Use linear time if possible.",
+    "edge_case_hints": ["single element", "all distinct", "negative values"]
+  },
+  {
+    "id": "stripe-product-except-self",
+    "title": "Product Except Self",
+    "company": "Stripe",
+    "difficulty": "medium",
+    "prompt": "Given an integer array nums, return an array answer where answer[i] is the product of all the elements of nums except nums[i]. Do not use division.",
+    "constraints": [
+      "2 <= nums.length <= 100000",
+      "-30 <= nums[i] <= 30"
+    ],
+    "examples": [
+      { "input": "nums = [1,2,3,4]", "output": "[24,12,8,6]" },
+      { "input": "nums = [-1,1,0,-3,3]", "output": "[0,0,9,0,0]" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "productExceptSelf",
+      "typescript_params": "nums: number[]",
+      "python_params": "nums: list[int]",
+      "java_signature": "int[] productExceptSelf(int[] nums)",
+      "csharp_signature": "int[] ProductExceptSelf(int[] nums)"
+    },
+    "expected_topics": ["prefix products", "suffix products", "constant extra space"],
+    "style_tags": ["financial correctness", "careful bookkeeping", "space optimization"],
+    "complexity_target": "Target O(n) time and avoid allocating more than the output array if you can.",
+    "edge_case_hints": ["zeros in the array", "negative numbers", "minimum length"]
+  },
+  {
+    "id": "stripe-subarray-sum-k",
+    "title": "Subarray Sum Equals K",
+    "company": "Stripe",
+    "difficulty": "medium",
+    "prompt": "Given an array of integers nums and an integer k, return the total number of continuous subarrays whose sum equals k.",
+    "constraints": [
+      "1 <= nums.length <= 20000",
+      "-1000 <= nums[i] <= 1000",
+      "-10000000 <= k <= 10000000"
+    ],
+    "examples": [
+      { "input": "nums = [1,1,1], k = 2", "output": "2" },
+      { "input": "nums = [1,2,3], k = 3", "output": "2" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "subarraySum",
+      "typescript_params": "nums: number[], k: number",
+      "python_params": "nums: list[int], k: int",
+      "java_signature": "int subarraySum(int[] nums, int k)",
+      "csharp_signature": "int SubarraySum(int[] nums, int k)"
+    },
+    "expected_topics": ["prefix sum", "hash map", "running total"],
+    "style_tags": ["financial events", "stream reasoning", "counting"],
+    "complexity_target": "Avoid the quadratic scan by using prefix sums and frequency lookup.",
+    "edge_case_hints": ["negative numbers", "k equals zero", "multiple overlapping matches"]
+  },
+  {
+    "id": "stripe-merge-k-sorted-lists",
+    "title": "Merge K Sorted Lists",
+    "company": "Stripe",
+    "difficulty": "hard",
+    "prompt": "You are given an array of k sorted linked lists. Merge all the lists into one sorted linked list and return it.",
+    "constraints": [
+      "0 <= k <= 10000",
+      "The total number of nodes across all lists is at most 100000"
+    ],
+    "examples": [
+      {
+        "input": "lists = [[1,4,5],[1,3,4],[2,6]]",
+        "output": "[1,1,2,3,4,4,5,6]"
+      }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "mergeKLists",
+      "typescript_params": "lists: Array<ListNode | null>",
+      "python_params": "lists: list['ListNode | None']",
+      "java_signature": "ListNode mergeKLists(ListNode[] lists)",
+      "csharp_signature": "ListNode MergeKLists(ListNode[] lists)"
+    },
+    "expected_topics": ["heap", "divide and conquer", "linked list merging"],
+    "style_tags": ["aggregation", "ordered streams", "efficiency"],
+    "complexity_target": "Use a priority queue or divide-and-conquer instead of repeatedly scanning all list heads.",
+    "edge_case_hints": ["empty input", "some empty lists", "single long list"]
+  }
+]

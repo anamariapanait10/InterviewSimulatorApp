@@ -1,0 +1,83 @@
+[
+  {
+    "id": "netflix-meeting-rooms",
+    "title": "Meeting Rooms",
+    "company": "Netflix",
+    "difficulty": "easy",
+    "prompt": "Given an array of meeting time intervals where intervals[i] = [start, end], determine if a person could attend all meetings.",
+    "constraints": [
+      "0 <= intervals.length <= 10000"
+    ],
+    "examples": [
+      { "input": "intervals = [[0,30],[5,10],[15,20]]", "output": "false" },
+      { "input": "intervals = [[7,10],[2,4]]", "output": "true" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "canAttendMeetings",
+      "typescript_params": "intervals: number[][]",
+      "python_params": "intervals: list[list[int]]",
+      "java_signature": "boolean canAttendMeetings(int[][] intervals)",
+      "csharp_signature": "bool CanAttendMeetings(int[][] intervals)"
+    },
+    "expected_topics": ["sorting", "interval overlap"],
+    "style_tags": ["scheduling", "conflict detection"],
+    "complexity_target": "Sorting once and scanning is enough.",
+    "edge_case_hints": ["empty input", "touching endpoints", "already sorted meetings"]
+  },
+  {
+    "id": "netflix-task-scheduler",
+    "title": "Task Scheduler",
+    "company": "Netflix",
+    "difficulty": "medium",
+    "prompt": "You are given an array of CPU tasks and a cooldown n. Return the minimum number of time units needed to finish all tasks when identical tasks must be separated by at least n units.",
+    "constraints": [
+      "1 <= tasks.length <= 10000",
+      "0 <= n <= 100"
+    ],
+    "examples": [
+      { "input": "tasks = [\"A\",\"A\",\"A\",\"B\",\"B\",\"B\"], n = 2", "output": "8" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "leastInterval",
+      "typescript_params": "tasks: string[], n: number",
+      "python_params": "tasks: list[str], n: int",
+      "java_signature": "int leastInterval(char[] tasks, int n)",
+      "csharp_signature": "int LeastInterval(char[] tasks, int n)"
+    },
+    "expected_topics": ["greedy", "frequency counting", "scheduling"],
+    "style_tags": ["throughput", "resource scheduling", "load shaping"],
+    "complexity_target": "Use task counts and scheduling logic instead of simulating every choice expensively.",
+    "edge_case_hints": ["n = 0", "single task type", "many tasks with same frequency"]
+  },
+  {
+    "id": "netflix-lru-cache",
+    "title": "LRU Cache",
+    "company": "Netflix",
+    "difficulty": "hard",
+    "prompt": "Implement an LRU cache that supports get and put in O(1) average time. When capacity is exceeded, evict the least recently used item.",
+    "constraints": [
+      "1 <= capacity <= 3000",
+      "Up to 200000 operations"
+    ],
+    "examples": [
+      {
+        "input": "LRUCache(2), put(1,1), put(2,2), get(1), put(3,3), get(2)",
+        "output": "1, -1"
+      }
+    ],
+    "starter_template": {
+      "kind": "class",
+      "typescript": "export class LRUCache {\n  constructor(capacity: number) {\n    // Explain your thinking as you code.\n  }\n\n  get(key: number): number {\n    return -1\n  }\n\n  put(key: number, value: number): void {}\n}\n",
+      "javascript": "export class LRUCache {\n  constructor(capacity) {\n    // Explain your thinking as you code.\n  }\n\n  get(key) {\n    return -1\n  }\n\n  put(key, value) {}\n}\n",
+      "python": "class LRUCache:\n    def __init__(self, capacity: int):\n        # Explain your thinking as you code.\n        pass\n\n    def get(self, key: int) -> int:\n        return -1\n\n    def put(self, key: int, value: int) -> None:\n        pass\n",
+      "java": "class LRUCache {\n    public LRUCache(int capacity) {}\n\n    public int get(int key) {\n        return -1;\n    }\n\n    public void put(int key, int value) {}\n}\n",
+      "csharp": "public class LRUCache\n{\n    public LRUCache(int capacity) {}\n\n    public int Get(int key)\n    {\n        return -1;\n    }\n\n    public void Put(int key, int value) {}\n}\n"
+    },
+    "expected_topics": ["hash map", "doubly linked list", "state synchronization"],
+    "style_tags": ["systems thinking", "mutable state", "efficiency under pressure"],
+    "complexity_target": "The interviewer will expect O(1) average time for both operations.",
+    "edge_case_hints": ["capacity one", "updating existing key", "evicting the current tail"]
+  }
+]

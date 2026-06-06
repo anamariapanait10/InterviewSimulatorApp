@@ -1,0 +1,118 @@
+[
+  {
+    "id": "google-two-sum",
+    "title": "Two Sum",
+    "company": "Google",
+    "difficulty": "easy",
+    "prompt": "Given an array of integers nums and an integer target, return the indices of the two numbers such that they add up to target.",
+    "constraints": [
+      "2 <= nums.length <= 10000",
+      "Exactly one valid answer exists"
+    ],
+    "examples": [
+      { "input": "nums = [2,7,11,15], target = 9", "output": "[0,1]" },
+      { "input": "nums = [3,2,4], target = 6", "output": "[1,2]" }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "twoSum",
+      "typescript_params": "nums: number[], target: number",
+      "python_params": "nums: list[int], target: int",
+      "java_signature": "int[] twoSum(int[] nums, int target)",
+      "csharp_signature": "int[] TwoSum(int[] nums, int target)"
+    },
+    "expected_topics": ["hash map", "array scan"],
+    "style_tags": ["fundamentals", "lookup", "reasoning clarity"],
+    "complexity_target": "Aim for linear time rather than trying every pair.",
+    "edge_case_hints": ["duplicate values", "negative numbers", "target formed by repeated value positions"]
+  },
+  {
+    "id": "google-longest-unique-substring",
+    "title": "Longest Unique Substring",
+    "company": "Google",
+    "difficulty": "medium",
+    "prompt": "Given a string s, return the length of the longest substring that contains no repeated characters. The solution should scale to long inputs without re-checking the same range over and over.",
+    "constraints": [
+      "0 <= s.length <= 100000",
+      "s may contain lowercase, uppercase, digits, spaces, and symbols"
+    ],
+    "examples": [
+      { "input": "s = \"abcabcbb\"", "output": "3", "explanation": "The answer is \"abc\"." },
+      { "input": "s = \"bbbbb\"", "output": "1", "explanation": "The answer is \"b\"." }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "lengthOfLongestSubstring",
+      "typescript_params": "s: string",
+      "python_params": "s: str",
+      "java_signature": "Integer lengthOfLongestSubstring(String s)",
+      "csharp_signature": "int LengthOfLongestSubstring(string s)"
+    },
+    "expected_topics": ["sliding window", "hash map", "two pointers"],
+    "style_tags": ["strings", "incremental optimization", "windowing", "index bookkeeping"],
+    "complexity_target": "Aim for O(n) time and O(min(n, alphabet)) space.",
+    "edge_case_hints": ["empty string", "all characters identical", "repeated character at both ends"]
+  },
+  {
+    "id": "google-number-of-islands",
+    "title": "Number of Islands",
+    "company": "Google",
+    "difficulty": "medium",
+    "prompt": "Given an m x n grid of '1's and '0's, return the number of islands. An island is formed by connecting adjacent land cells horizontally or vertically.",
+    "constraints": [
+      "1 <= m, n <= 300",
+      "grid[i][j] is '0' or '1'"
+    ],
+    "examples": [
+      {
+        "input": "grid = [[\"1\",\"1\",\"1\",\"1\",\"0\"],[\"1\",\"1\",\"0\",\"1\",\"0\"],[\"1\",\"1\",\"0\",\"0\",\"0\"],[\"0\",\"0\",\"0\",\"0\",\"0\"]]",
+        "output": "1"
+      },
+      {
+        "input": "grid = [[\"1\",\"1\",\"0\",\"0\",\"0\"],[\"1\",\"1\",\"0\",\"0\",\"0\"],[\"0\",\"0\",\"1\",\"0\",\"0\"],[\"0\",\"0\",\"0\",\"1\",\"1\"]]",
+        "output": "3"
+      }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "numIslands",
+      "typescript_params": "grid: string[][]",
+      "python_params": "grid: list[list[str]]",
+      "java_signature": "int numIslands(char[][] grid)",
+      "csharp_signature": "int NumIslands(char[][] grid)"
+    },
+    "expected_topics": ["graph traversal", "dfs or bfs", "grid traversal"],
+    "style_tags": ["grids", "connected components", "visit marking"],
+    "complexity_target": "Visit each cell at most once for O(m * n) time.",
+    "edge_case_hints": ["empty grid", "all water", "single large island"]
+  },
+  {
+    "id": "google-word-search-ii",
+    "title": "Word Search II",
+    "company": "Google",
+    "difficulty": "hard",
+    "prompt": "Given an m x n board of characters and a list of words, return all words from the list that can be formed in the board by sequentially adjacent cells. The same cell may not be used more than once in a word.",
+    "constraints": [
+      "1 <= board.length, board[0].length <= 12",
+      "1 <= words.length <= 30000"
+    ],
+    "examples": [
+      {
+        "input": "board = [[\"o\",\"a\",\"a\",\"n\"],[\"e\",\"t\",\"a\",\"e\"],[\"i\",\"h\",\"k\",\"r\"],[\"i\",\"f\",\"l\",\"v\"]], words = [\"oath\",\"pea\",\"eat\",\"rain\"]",
+        "output": "[\"eat\",\"oath\"]"
+      }
+    ],
+    "starter_template": {
+      "kind": "function",
+      "name": "findWords",
+      "typescript_params": "board: string[][], words: string[]",
+      "python_params": "board: list[list[str]], words: list[str]",
+      "java_signature": "List<String> findWords(char[][] board, String[] words)",
+      "csharp_signature": "IList<string> FindWords(char[][] board, string[] words)"
+    },
+    "expected_topics": ["trie", "backtracking", "grid dfs"],
+    "style_tags": ["search", "pruning", "dictionary matching"],
+    "complexity_target": "Use pruning so you do not start a full search for every word independently.",
+    "edge_case_hints": ["duplicate words", "single-letter board", "words sharing prefixes"]
+  }
+]

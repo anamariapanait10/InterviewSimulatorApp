@@ -391,12 +391,41 @@ Rules:
 
 
 async def _fetch_problem_candidates(session: dict[str, Any]) -> list[dict[str, Any]]:
+    target_company = str(session.get("target_company") or session.get("company_name") or "").strip()
+    difficulty = str(session.get("coding_difficulty") or "").strip()
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        if target_company and difficulty:
+            response = await client.get(
+                f"{BACKEND_BASE_URL}/api/internal/coding-problems",
+                params={"company": target_company, "difficulty": difficulty},
+            )
+            response.raise_for_status()
+            exact_rows = response.json()
+            if isinstance(exact_rows, list) and exact_rows:
+                return [
+                    {
+                        "content": str(problem.get("prompt") or ""),
+                        "metadata": {
+                            "problem_id": str(problem.get("id") or ""),
+                            "title": str(problem.get("title") or ""),
+                            "company": str(problem.get("company") or ""),
+                            "difficulty": str(problem.get("difficulty") or ""),
+                            "expected_topics": ", ".join(problem.get("expected_topics") or []),
+                            "style_tags": ", ".join(problem.get("style_tags") or []),
+                        },
+                        "distance": 0.0,
+                    }
+                    for problem in exact_rows
+                    if isinstance(problem, dict)
+                ]
+
     query = "\n".join(
         part
         for part in [
-            str(session.get("target_company") or session.get("company_name") or ""),
+            target_company,
             str(session.get("role_title") or ""),
-            str(session.get("coding_difficulty") or ""),
+            difficulty,
             str(session.get("company_context") or "")[:1800],
             str(session.get("job_description_text") or "")[:1800],
         ]
@@ -405,12 +434,20 @@ async def _fetch_problem_candidates(session: dict[str, Any]) -> list[dict[str, A
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
             f"{BACKEND_BASE_URL}/api/internal/problem-catalog/search",
-            json={"query": query, "top_k": 5},
+            json={"query": query, "top_k": 8},
         )
         response.raise_for_status()
         data = response.json()
         if not isinstance(data, list):
             raise RuntimeError("Problem catalog search returned invalid payload")
+        if difficulty:
+            difficulty_matches = [
+                row
+                for row in data
+                if str((row.get("metadata") or {}).get("difficulty") or "").strip().lower() == difficulty.lower()
+            ]
+            if difficulty_matches:
+                return difficulty_matches
         return data
 
 
@@ -973,11 +1010,22 @@ async def _resume_stage(session: dict[str, Any]) -> dict[str, Any]:
         if not selected_id:
             raise RuntimeError("Coding agent did not select a valid problem")
         selected_problem = await _fetch_problem(selected_id)
+        target_company = str(session.get("target_company") or session.get("company_name") or "").strip().lower()
+        matched_company = str(selected_problem.get("company") or "").strip()
+        matched_company_lower = matched_company.lower()
+        selected_difficulty = str(selected_problem.get("difficulty") or "").strip().lower()
+        requested_difficulty = str(session.get("coding_difficulty") or "medium").strip().lower()
+        if target_company and matched_company_lower == target_company and selected_difficulty == requested_difficulty:
+            selection_strategy = "exact_company"
+        elif selected_difficulty == requested_difficulty:
+            selection_strategy = "difficulty_style_match"
+        else:
+            selection_strategy = "rag_match"
         coding_round = {
             "enabled": True,
             "target_company": session.get("target_company"),
-            "matched_company": selected_problem.get("company"),
-            "selection_strategy": "rag_match",
+            "matched_company": matched_company,
+            "selection_strategy": selection_strategy,
             "interviewer_mode": session.get("interviewer_mode") or "neutral",
             "difficulty": session.get("coding_difficulty") or "medium",
             "problem": selected_problem,
