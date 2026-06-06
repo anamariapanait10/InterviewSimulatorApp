@@ -1,5 +1,6 @@
 import contextlib
 import hashlib
+import html
 import hmac
 import json
 import logging
@@ -12,6 +13,7 @@ import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 import fastapi
@@ -89,6 +91,7 @@ INTERVIEW_LENGTH_OPTIONS: dict[str, dict[str, int]] = {
     "long": {"behavioral": 6, "technical": 6},
 }
 SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".md", ".html"}
+JOB_URL_ALLOWED_SCHEMES = {"http", "https"}
 
 
 def get_agent_base_url() -> str:
@@ -119,6 +122,10 @@ def get_realtime_transcription_model() -> str:
     return (os.getenv("OPENAI_REALTIME_TRANSCRIPTION_MODEL") or "gpt-realtime-whisper").strip()
 
 
+def get_job_extraction_model() -> str:
+    return (os.getenv("OPENAI_JOB_EXTRACTION_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4.1-mini").strip()
+
+
 class InterviewSessionRecordRequest(BaseModel):
     record: InterviewSessionModel
 
@@ -141,6 +148,24 @@ class AuthResponse(BaseModel):
 class ParsedDocumentResponse(BaseModel):
     file_name: str
     extracted_text: str
+
+
+class JobUrlParseRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2000)
+
+
+class ParsedJobUrlResponse(BaseModel):
+    source_url: str
+    title: str
+    extracted_text: str
+
+
+class JobExtractionResult(BaseModel):
+    title: str
+    company: str | None = None
+    location: str | None = None
+    employment_type: str | None = None
+    description: str
 
 
 class CompanyCreateRequest(BaseModel):
@@ -180,6 +205,7 @@ class RagSearchRequest(BaseModel):
 class InterviewCreateRequest(BaseModel):
     resume_text: str = Field(min_length=1)
     job_description_text: str = Field(min_length=1)
+    job_description_link: str | None = Field(default=None, max_length=2000)
     interview_length: str = Field(pattern="^(short|medium|long)$")
     target_company: str | None = Field(default=None, max_length=80)
     company_id: str | None = None
@@ -348,6 +374,15 @@ def _truncate(text: str, limit: int = 240) -> str:
 
 def _normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalize_multiline_text(text: str) -> str:
+    normalized_newlines = re.sub(r"\r\n?", "\n", text)
+    paragraphs = [
+        re.sub(r"[ \t]+", " ", paragraph).strip()
+        for paragraph in re.split(r"\n\s*\n+", normalized_newlines)
+    ]
+    return "\n\n".join(paragraph for paragraph in paragraphs if paragraph)
 
 
 def _to_sentence_case(text: str) -> str:
@@ -1298,6 +1333,191 @@ def _get_markitdown():
     return MarkItDown
 
 
+def _strip_html_tags(value: str) -> str:
+    without_tags = re.sub(r"<[^>]+>", " ", value)
+    normalized = html.unescape(without_tags)
+    return _normalize_whitespace(normalized)
+
+
+def _extract_html_title(html_text: str) -> str:
+    match = re.search(r"<title[^>]*>(.*?)</title>", html_text, re.IGNORECASE | re.DOTALL)
+    return _strip_html_tags(match.group(1)) if match else ""
+
+
+def _extract_meta_content(html_text: str, key: str) -> str:
+    patterns = [
+        rf'<meta[^>]+property=["\']{re.escape(key)}["\'][^>]+content=["\'](.*?)["\']',
+        rf'<meta[^>]+name=["\']{re.escape(key)}["\'][^>]+content=["\'](.*?)["\']',
+        rf'<meta[^>]+content=["\'](.*?)["\'][^>]+property=["\']{re.escape(key)}["\']',
+        rf'<meta[^>]+content=["\'](.*?)["\'][^>]+name=["\']{re.escape(key)}["\']',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html_text, re.IGNORECASE | re.DOTALL)
+        if match:
+            return _strip_html_tags(match.group(1))
+    return ""
+
+
+def _iter_json_ld_objects(html_text: str) -> list[dict[str, Any]]:
+    matches = re.findall(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html_text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    objects: list[dict[str, Any]] = []
+    for raw_block in matches:
+        block = raw_block.strip()
+        if not block:
+            continue
+        try:
+            payload = json.loads(html.unescape(block))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            objects.append(payload)
+        elif isinstance(payload, list):
+            objects.extend(item for item in payload if isinstance(item, dict))
+    return objects
+
+
+def _prepare_job_page_for_llm(html_text: str) -> str:
+    title = _extract_html_title(html_text)
+    og_title = _extract_meta_content(html_text, "og:title")
+    meta_description = _extract_meta_content(html_text, "description")
+    og_description = _extract_meta_content(html_text, "og:description")
+
+    json_ld_snippets: list[str] = []
+    for item in _iter_json_ld_objects(html_text)[:6]:
+        try:
+            json_ld_snippets.append(json.dumps(item, ensure_ascii=True)[:4000])
+        except Exception:
+            continue
+
+    body_match = re.search(r"<body[^>]*>(.*?)</body>", html_text, re.IGNORECASE | re.DOTALL)
+    body_text = _strip_html_tags(body_match.group(1)) if body_match else _strip_html_tags(html_text)
+    body_text = body_text[:18000]
+
+    sections = [
+        f"HTML title: {title}" if title else "",
+        f"OG title: {og_title}" if og_title else "",
+        f"Meta description: {meta_description}" if meta_description else "",
+        f"OG description: {og_description}" if og_description else "",
+        "JSON-LD snippets:\n" + "\n\n".join(json_ld_snippets) if json_ld_snippets else "",
+        f"Visible page text:\n{body_text}" if body_text else "",
+    ]
+    return "\n\n".join(section for section in sections if section).strip()
+
+
+def _get_openai_client():
+    from openai import OpenAI
+
+    return OpenAI(
+        api_key=get_openai_api_key(),
+        base_url=get_openai_base_url(),
+    )
+
+
+def _extract_job_post_with_llm(page_content: str, source_url: str) -> ParsedJobUrlResponse:
+    if len(page_content.strip()) < 120:
+        raise fastapi.HTTPException(
+            status_code=422,
+            detail="The job page did not expose enough readable content to extract a description.",
+        )
+
+    client = _get_openai_client()
+    completion = client.chat.completions.create(
+        model=get_job_extraction_model(),
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You extract structured job descriptions from raw web page content. "
+                    "Return strict JSON with keys: title, company, location, employment_type, description. "
+                    "The description must be plain text, exactly as it appears on the page."
+                    "Include newlines and bullet points if they are present in the original description."
+                    "Ignore disclaimers, footers, and boilerplate text."
+                    "Ignore page chrome, navigation, login prompts, cookie banners, and unrelated recommendations. "
+                    "If the page is mostly a login wall or does not contain a real job description, return an empty description."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Source URL:\n{source_url}\n\n"
+                    "Extract the job description from this page content:\n\n"
+                    f"{page_content}"
+                ),
+            },
+        ],
+    )
+
+    content = completion.choices[0].message.content if completion.choices else None
+    if not content:
+        raise fastapi.HTTPException(status_code=422, detail="The AI extractor returned no content for this job page")
+
+    try:
+        payload = json.loads(content)
+        extracted = JobExtractionResult.model_validate(payload)
+    except Exception as exc:
+        raise fastapi.HTTPException(status_code=422, detail="The AI extractor returned an invalid job description payload") from exc
+
+    description = _normalize_multiline_text(extracted.description)
+    if len(description) < 120:
+        raise fastapi.HTTPException(
+            status_code=422,
+            detail="The AI extractor could not find a usable job description on this page.",
+        )
+
+    blocks = [f"Job title: {_normalize_whitespace(extracted.title) or 'Imported job post'}"]
+    if extracted.company:
+        blocks.append(f"Company: {_normalize_whitespace(extracted.company)}")
+    if extracted.location:
+        blocks.append(f"Location: {_normalize_whitespace(extracted.location)}")
+    if extracted.employment_type:
+        blocks.append(f"Employment type: {_normalize_whitespace(extracted.employment_type)}")
+    blocks.append(f"Source URL: {source_url}")
+    blocks.append(f"Description:\n{description}")
+
+    return ParsedJobUrlResponse(
+        source_url=source_url,
+        title=_normalize_whitespace(extracted.title) or "Imported job post",
+        extracted_text="\n\n".join(blocks).strip(),
+    )
+
+
+async def _parse_job_url(url: str) -> ParsedJobUrlResponse:
+    parsed = urlparse(url.strip())
+    if parsed.scheme.lower() not in JOB_URL_ALLOWED_SCHEMES or not parsed.netloc:
+        raise fastapi.HTTPException(status_code=400, detail="Enter a valid http or https job URL")
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True, headers=headers) as client:
+            response = await client.get(url.strip())
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise fastapi.HTTPException(status_code=422, detail=f"Unable to fetch the job URL: {exc}") from exc
+
+    html_text = response.text
+    if not html_text.strip():
+        raise fastapi.HTTPException(status_code=422, detail="The job URL returned an empty page")
+    page_content = _prepare_job_page_for_llm(html_text)
+    return await fastapi.concurrency.run_in_threadpool(
+        _extract_job_post_with_llm,
+        page_content,
+        str(response.url),
+    )
+
+
 async def _parse_document_with_markitdown(file: fastapi.UploadFile) -> ParsedDocumentResponse:
     if not file.filename:
         raise fastapi.HTTPException(status_code=400, detail="No file provided")
@@ -1609,6 +1829,14 @@ async def parse_document(
     return await _parse_document_with_markitdown(file)
 
 
+@app.post("/api/interviews/parse-job-url", response_model=ParsedJobUrlResponse)
+async def parse_job_url(
+    payload: JobUrlParseRequest,
+    _: UserModel = fastapi.Depends(_get_current_user),
+):
+    return await _parse_job_url(payload.url)
+
+
 @app.post("/api/interviews", response_model=InterviewSessionModel)
 async def create_interview(
     payload: InterviewCreateRequest,
@@ -1633,6 +1861,7 @@ async def create_interview(
         company_name=company.name if company else None,
         company_context=company_context,
         resume_text=resume_text,
+        job_description_link=(payload.job_description_link or "").strip() or None,
         job_description_text=job_description_text,
         interview_length=payload.interview_length,
         role_title=role_title_guess,

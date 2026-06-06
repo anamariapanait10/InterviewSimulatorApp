@@ -289,6 +289,73 @@
   background: rgba(39, 52, 73, 0.72);
 }
 
+.voice-toggle-button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  text-align: left;
+  border-radius: 1rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--line-soft);
+  background: rgba(39, 52, 73, 0.72);
+  transition:
+    transform 160ms ease,
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.voice-toggle-button:hover {
+  transform: translateY(-1px);
+}
+
+.voice-toggle-button.active {
+  background: rgba(124, 58, 237, 0.18);
+  border-color: rgba(167, 139, 250, 0.42);
+  box-shadow: inset 0 0 0 1px rgba(167, 139, 250, 0.12);
+}
+
+.voice-toggle-track {
+  position: relative;
+  display: inline-flex;
+  width: 3.4rem;
+  min-width: 3.4rem;
+  height: 2rem;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.28);
+  transition: background-color 160ms ease;
+}
+
+.voice-toggle-button.active .voice-toggle-track {
+  background: rgba(124, 58, 237, 0.72);
+}
+
+.voice-toggle-thumb {
+  position: absolute;
+  top: 0.2rem;
+  left: 0.2rem;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 999px;
+  background: #fff;
+  transition: transform 160ms ease;
+}
+
+.voice-toggle-button.active .voice-toggle-thumb {
+  transform: translateX(1.4rem);
+}
+
+.voice-toggle-copy {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.voice-toggle-copy span {
+  color: var(--ink-soft);
+  line-height: 1.6;
+}
+
 .length-option span {
   color: var(--ink-soft);
 }

@@ -263,6 +263,12 @@ export interface ParsedDocumentResponse {
   extracted_text: string
 }
 
+export interface ParsedJobUrlResponse {
+  source_url: string
+  title: string
+  extracted_text: string
+}
+
 export interface InterviewHelpResponse {
   question_id: string
   content: string

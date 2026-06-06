@@ -8,6 +8,7 @@ import type {
   InterviewHistoryItem,
   InterviewSession,
   ParsedDocumentResponse,
+  ParsedJobUrlResponse,
   RagSearchResult,
   User,
 } from './types'
@@ -103,9 +104,20 @@ export async function parseDocument(file: File): Promise<ParsedDocumentResponse>
   return parseJson<ParsedDocumentResponse>(response)
 }
 
+export async function parseJobUrl(url: string): Promise<ParsedJobUrlResponse> {
+  const response = await fetch('/api/interviews/parse-job-url', {
+    method: 'POST',
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ url }),
+  })
+
+  return parseJson<ParsedJobUrlResponse>(response)
+}
+
 export async function createInterview(payload: {
   resume_text: string
   job_description_text: string
+  job_description_link?: string
   interview_length: 'short' | 'medium' | 'long'
   target_company?: string
   company_id?: string | null
