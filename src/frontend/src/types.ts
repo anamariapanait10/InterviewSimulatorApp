@@ -246,6 +246,8 @@ export interface InterviewSession {
   report: InterviewReport | null
   is_completed: boolean
   practice_duration_seconds: number | null
+  focus_loss_count?: number
+  focus_loss_seconds?: number
   created_at: string
   completed_at: string | null
 }
@@ -262,6 +264,12 @@ export interface InterviewHistoryItem {
   is_completed: boolean
   score: number | null
   practice_duration_seconds: number | null
+  hint_count: number
+  model_answer_count: number
+  used_help: boolean
+  independent_answer_ratio: number | null
+  focus_loss_count: number
+  focus_loss_seconds: number
   created_at: string
   completed_at: string | null
 }

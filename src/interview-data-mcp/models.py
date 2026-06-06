@@ -251,6 +251,8 @@ class InterviewSessionModel(BaseModel):
     report: InterviewReportModel | None = None
     is_completed: bool = False
     practice_duration_seconds: int | None = None
+    focus_loss_count: int = 0
+    focus_loss_seconds: int = 0
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     completed_at: datetime | None = None

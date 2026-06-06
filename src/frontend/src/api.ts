@@ -207,6 +207,21 @@ export async function recordPracticeDuration(
   await parseJson<InterviewSession>(response)
 }
 
+export async function recordFocusLoss(
+  sessionId: string,
+  seconds: number,
+  options?: { keepalive?: boolean },
+): Promise<void> {
+  const response = await fetch(`/api/interviews/${sessionId}/focus-loss`, {
+    method: 'POST',
+    headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ seconds }),
+    keepalive: options?.keepalive ?? false,
+  })
+
+  await parseJson<InterviewSession>(response)
+}
+
 export async function finishInterview(
   sessionId: string,
   payload: {

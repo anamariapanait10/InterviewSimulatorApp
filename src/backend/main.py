@@ -227,6 +227,10 @@ class PracticeDurationUpdateRequest(BaseModel):
     seconds: int = Field(ge=1, le=3600)
 
 
+class FocusLossUpdateRequest(BaseModel):
+    seconds: int = Field(ge=1, le=3600)
+
+
 class InterviewFinishRequest(BaseModel):
     answer_text: str | None = None
     code: str | None = None
@@ -267,6 +271,12 @@ class InterviewHistoryItem(BaseModel):
     is_completed: bool
     score: int | None = None
     practice_duration_seconds: int | None = None
+    hint_count: int = 0
+    model_answer_count: int = 0
+    used_help: bool = False
+    independent_answer_ratio: float | None = None
+    focus_loss_count: int = 0
+    focus_loss_seconds: int = 0
     created_at: str
     completed_at: str | None = None
 
@@ -1187,6 +1197,20 @@ def _session_transcript_entry(question: InterviewQuestionModel, answer_text: str
 
 
 def _history_item_from_session(session: InterviewSessionModel) -> InterviewHistoryItem:
+    hint_count = sum(1 for item in session.support_history if item.mode == "hint")
+    model_answer_count = sum(1 for item in session.support_history if item.mode == "model_answer")
+    assisted_question_ids = {
+        item.question_id
+        for item in session.support_history
+        if item.question_id and item.stage in {"behavioral", "technical"}
+    }
+    answered_question_ids = {answer.question_id for answer in session.answers if answer.question_id}
+    independent_ratio = (
+        round(len(answered_question_ids - assisted_question_ids) / len(answered_question_ids), 2)
+        if answered_question_ids
+        else None
+    )
+
     return InterviewHistoryItem(
         id=str(session.id),
         role_title=session.role_title or _extract_role_title(session.job_description_text or "") or "Interview",
@@ -1199,6 +1223,12 @@ def _history_item_from_session(session: InterviewSessionModel) -> InterviewHisto
         is_completed=session.is_completed,
         score=session.score,
         practice_duration_seconds=session.practice_duration_seconds,
+        hint_count=hint_count,
+        model_answer_count=model_answer_count,
+        used_help=bool(session.support_history),
+        independent_answer_ratio=independent_ratio,
+        focus_loss_count=session.focus_loss_count,
+        focus_loss_seconds=session.focus_loss_seconds,
         created_at=session.created_at.isoformat(),
         completed_at=session.completed_at.isoformat() if session.completed_at else None,
     )
@@ -1988,6 +2018,24 @@ async def record_practice_duration(
     updated = await repo.increment_practice_duration(session_id, payload.seconds, current_user.id)
     if updated is None:
         raise fastapi.HTTPException(status_code=500, detail="Unable to record practice duration")
+    return updated
+
+
+@app.post("/api/interviews/{session_id}/focus-loss", response_model=InterviewSessionModel)
+async def record_focus_loss(
+    session_id: UUID,
+    payload: FocusLossUpdateRequest,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
+    session = await repo.get_interview_session(session_id, current_user.id)
+    if session is None:
+        raise fastapi.HTTPException(status_code=404, detail="Interview not found")
+    if session.is_completed:
+        return session
+
+    updated = await repo.record_focus_loss(session_id, payload.seconds, current_user.id)
+    if updated is None:
+        raise fastapi.HTTPException(status_code=500, detail="Unable to record focus loss")
     return updated
 
 

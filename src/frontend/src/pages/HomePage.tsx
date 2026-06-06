@@ -31,6 +31,75 @@ function formatPracticeHours(totalSeconds: number): string {
   return `${(totalSeconds / 3600).toFixed(1)}h`
 }
 
+function formatPercent(value: number): string {
+  return `${Math.round(value * 100)}%`
+}
+
+function buildPracticeInsights(history: InterviewHistoryItem[]): string[] {
+  if (history.length === 0) {
+    return []
+  }
+
+  const now = Date.now()
+  const fourteenDaysMs = 14 * 24 * 60 * 60 * 1000
+  const recent = history.filter((item) => now - Date.parse(item.created_at) <= fourteenDaysMs)
+  const previousWindow = history.filter((item) => {
+    const age = now - Date.parse(item.created_at)
+    return age > fourteenDaysMs && age <= fourteenDaysMs * 2
+  })
+
+  const recentCompleted = recent.filter((item) => item.is_completed && typeof item.score === 'number')
+  const previousCompleted = previousWindow.filter((item) => item.is_completed && typeof item.score === 'number')
+  const recentAverage = recentCompleted.length
+    ? recentCompleted.reduce((sum, item) => sum + (item.score ?? 0), 0) / recentCompleted.length
+    : null
+  const previousAverage = previousCompleted.length
+    ? previousCompleted.reduce((sum, item) => sum + (item.score ?? 0), 0) / previousCompleted.length
+    : null
+
+  const helpUsedCount = history.filter((item) => item.used_help).length
+  const noHelpCount = history.length - helpUsedCount
+  const independentRatios = history
+    .map((item) => item.independent_answer_ratio)
+    .filter((value): value is number => value !== null)
+  const averageIndependentRatio = independentRatios.length
+    ? independentRatios.reduce((sum, value) => sum + value, 0) / independentRatios.length
+    : null
+  const totalFocusLossSeconds = history.reduce((sum, item) => sum + item.focus_loss_seconds, 0)
+  const latestInterviewAt = Math.max(...history.map((item) => Date.parse(item.created_at)))
+  const daysSinceLastInterview = Math.floor((now - latestInterviewAt) / (24 * 60 * 60 * 1000))
+
+  const insights: string[] = []
+  if (daysSinceLastInterview >= 10) {
+    insights.push(`You have taken a longer break: ${daysSinceLastInterview} days since the last interview.`)
+  } else if (recentAverage !== null && previousAverage !== null) {
+    const delta = recentAverage - previousAverage
+    if (delta >= 5) {
+      insights.push(`Your recent results show improvement: average score is up ${Math.round(delta)} points versus the previous two weeks.`)
+    } else if (delta <= -5) {
+      insights.push(`Recent performance has dipped by ${Math.round(Math.abs(delta))} points compared with the previous two weeks.`)
+    } else {
+      insights.push('Your scores are fairly stable lately, which suggests a period of consolidation or stagnation.')
+    }
+  }
+
+  if (averageIndependentRatio !== null) {
+    insights.push(
+      `You solved ${formatPercent(averageIndependentRatio)} of answered pre-coding questions without using built-in help on average.`,
+    )
+  }
+
+  insights.push(
+    `${noHelpCount} interview${noHelpCount === 1 ? '' : 's'} were completed without help, while ${helpUsedCount} used hints or model answers.`,
+  )
+
+  if (totalFocusLossSeconds > 0) {
+    insights.push(`You spent about ${Math.round(totalFocusLossSeconds / 60)} minute${Math.round(totalFocusLossSeconds / 60) === 1 ? '' : 's'} away from the interview tab across saved sessions.`)
+  }
+
+  return insights.slice(0, 4)
+}
+
 function buildTopCompanies(history: InterviewHistoryItem[]) {
   const usage = new Map<string, { name: string; count: number; averageScore: number | null }>()
 
@@ -358,6 +427,18 @@ export default function HomePage() {
   }
   const maxLengthCount = Math.max(1, lengthBreakdown.short, lengthBreakdown.medium, lengthBreakdown.long)
   const topCompanies = buildTopCompanies(history)
+  const interviewsWithHelp = history.filter((item) => item.used_help).length
+  const interviewsWithoutHelp = history.length - interviewsWithHelp
+  const independentAnswerRatioValues = history
+    .map((item) => item.independent_answer_ratio)
+    .filter((value): value is number => value !== null)
+  const averageIndependentAnswerRatio = independentAnswerRatioValues.length
+    ? independentAnswerRatioValues.reduce((sum, value) => sum + value, 0) / independentAnswerRatioValues.length
+    : null
+  const totalFocusLossMinutes = Math.round(
+    history.reduce((sum, item) => sum + item.focus_loss_seconds, 0) / 60,
+  )
+  const practiceInsights = buildPracticeInsights(history)
 
   return (
     <section className="home-layout">
@@ -490,6 +571,38 @@ export default function HomePage() {
                         </div>
                       )
                     })}
+                  </div>
+                </article>
+
+                <article className="flow-card dashboard-panel insight-panel">
+                  <p className="section-eyebrow">Recent Feedback</p>
+                  <h2>What your latest practice pattern suggests</h2>
+                  {practiceInsights.length === 0 ? (
+                    <p className="support-copy">
+                      Finish a few interviews to unlock trend-based coaching.
+                    </p>
+                  ) : (
+                    <ul className="detail-list dashboard-insights">
+                      {practiceInsights.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  )}
+                </article>
+
+                <article className="flow-card dashboard-panel insight-panel">
+                  <p className="section-eyebrow">Independence</p>
+                  <h2>How often you rely on help during practice</h2>
+                  <div className="score-list">
+                    <p>Without help: {interviewsWithoutHelp}</p>
+                    <p>With help: {interviewsWithHelp}</p>
+                    <p>
+                      Independent answer rate:{' '}
+                      {averageIndependentAnswerRatio === null
+                        ? 'Unavailable'
+                        : formatPercent(averageIndependentAnswerRatio)}
+                    </p>
+                    <p>Focus loss time: {totalFocusLossMinutes} min</p>
                   </div>
                 </article>
 

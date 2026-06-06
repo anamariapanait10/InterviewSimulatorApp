@@ -256,6 +256,8 @@ class InterviewSessionModel(BaseModel):
     report: InterviewReportModel | None = None
     is_completed: bool = False
     practice_duration_seconds: int | None = None
+    focus_loss_count: int = 0
+    focus_loss_seconds: int = 0
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     completed_at: datetime | None = None
@@ -300,6 +302,8 @@ OPTIONAL_COLUMNS: dict[str, str] = {
     "score": "INTEGER",
     "report_json": "TEXT",
     "practice_duration_seconds": "INTEGER NOT NULL DEFAULT 0",
+    "focus_loss_count": "INTEGER NOT NULL DEFAULT 0",
+    "focus_loss_seconds": "INTEGER NOT NULL DEFAULT 0",
     "completed_at": "TEXT",
 }
 
@@ -420,6 +424,8 @@ def _row_to_model(row: aiosqlite.Row) -> InterviewSessionModel:
         report=_load_json_object(row["report_json"], InterviewReportModel),
         is_completed=bool(row["is_completed"]),
         practice_duration_seconds=int(row["practice_duration_seconds"] or 0),
+        focus_loss_count=int(row["focus_loss_count"] or 0),
+        focus_loss_seconds=int(row["focus_loss_seconds"] or 0),
         created_at=created_at,
         updated_at=updated_at,
         completed_at=_parse_datetime(row["completed_at"]),
@@ -522,6 +528,8 @@ class InterviewSessionRepository:
                     score INTEGER,
                     report_json TEXT,
                     practice_duration_seconds INTEGER NOT NULL DEFAULT 0,
+                    focus_loss_count INTEGER NOT NULL DEFAULT 0,
+                    focus_loss_seconds INTEGER NOT NULL DEFAULT 0,
                     completed_at TEXT
                 )
                 """
@@ -571,6 +579,8 @@ class InterviewSessionRepository:
                     score,
                     report_json,
                     practice_duration_seconds,
+                    focus_loss_count,
+                    focus_loss_seconds,
                     is_completed,
                     created_at,
                     updated_at,
@@ -613,6 +623,8 @@ class InterviewSessionRepository:
                     record.score,
                     _serialize_report(record.report),
                     record.practice_duration_seconds or 0,
+                    record.focus_loss_count,
+                    record.focus_loss_seconds,
                     int(record.is_completed),
                     (record.created_at or now).isoformat(),
                     (record.updated_at or now).isoformat(),
@@ -747,6 +759,8 @@ class InterviewSessionRepository:
             report=pick("report"),
             is_completed=pick("is_completed"),
             practice_duration_seconds=pick("practice_duration_seconds"),
+            focus_loss_count=pick("focus_loss_count"),
+            focus_loss_seconds=pick("focus_loss_seconds"),
             created_at=existing.created_at,
             updated_at=utcnow(),
             completed_at=pick("completed_at"),
@@ -790,6 +804,8 @@ class InterviewSessionRepository:
                     score = ?,
                     report_json = ?,
                     practice_duration_seconds = ?,
+                    focus_loss_count = ?,
+                    focus_loss_seconds = ?,
                     is_completed = ?,
                     updated_at = ?,
                     completed_at = ?
@@ -830,6 +846,8 @@ class InterviewSessionRepository:
                     updated_record.score,
                     _serialize_report(updated_record.report),
                     updated_record.practice_duration_seconds or 0,
+                    updated_record.focus_loss_count,
+                    updated_record.focus_loss_seconds,
                     int(updated_record.is_completed),
                     updated_record.updated_at.isoformat(),
                     updated_record.completed_at.isoformat() if updated_record.completed_at else None,
@@ -924,6 +942,43 @@ class InterviewSessionRepository:
                     """
                     UPDATE InterviewSessions
                     SET practice_duration_seconds = COALESCE(practice_duration_seconds, 0) + ?,
+                        updated_at = ?
+                    WHERE id = ? AND user_id = ?
+                    """,
+                    (seconds, utcnow().isoformat(), str(session_id), str(user_id)),
+                )
+            await conn.commit()
+
+        return await self.get_interview_session(session_id, user_id or current.user_id)
+
+    async def record_focus_loss(
+        self,
+        session_id: UUID,
+        seconds: int,
+        user_id: UUID | None = None,
+    ) -> InterviewSessionModel | None:
+        current = await self.get_interview_session(session_id, user_id)
+        if current is None:
+            return None
+
+        async with aiosqlite.connect(DATABASE_PATH) as conn:
+            if user_id is None:
+                await conn.execute(
+                    """
+                    UPDATE InterviewSessions
+                    SET focus_loss_count = COALESCE(focus_loss_count, 0) + 1,
+                        focus_loss_seconds = COALESCE(focus_loss_seconds, 0) + ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (seconds, utcnow().isoformat(), str(session_id)),
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE InterviewSessions
+                    SET focus_loss_count = COALESCE(focus_loss_count, 0) + 1,
+                        focus_loss_seconds = COALESCE(focus_loss_seconds, 0) + ?,
                         updated_at = ?
                     WHERE id = ? AND user_id = ?
                     """,

@@ -7,6 +7,7 @@ import {
   getInterview,
   getInterviewHint,
   getInterviewModelAnswer,
+  recordFocusLoss,
   recordPracticeDuration,
   skipInterviewQuestion,
   submitInterviewAnswer,
@@ -112,6 +113,7 @@ export default function InterviewRunPage() {
   const interimTranscriptRef = useRef('')
   const pendingSpeechTimeoutRef = useRef<number | null>(null)
   const realtimeVoiceRef = useRef('marin')
+  const focusLostAtRef = useRef<number | null>(null)
 
   const captureElapsedPractice = () => {
     if (activeStartedAtRef.current === null) {
@@ -187,6 +189,47 @@ export default function InterviewRunPage() {
       )
     } catch {
       pendingPracticeMsRef.current += wholeSeconds * 1000
+    }
+  }
+
+  const syncFocusLossState = async (options?: { keepalive?: boolean }) => {
+    const currentSession = sessionRef.current
+    if (!currentSession || currentSession.is_completed) {
+      focusLostAtRef.current = null
+      return
+    }
+
+    const hasFocusNow = document.visibilityState === 'visible' && document.hasFocus()
+    if (!hasFocusNow) {
+      if (focusLostAtRef.current === null) {
+        focusLostAtRef.current = Date.now()
+      }
+      return
+    }
+
+    if (focusLostAtRef.current === null) {
+      return
+    }
+
+    const elapsedSeconds = Math.floor((Date.now() - focusLostAtRef.current) / 1000)
+    focusLostAtRef.current = null
+    if (elapsedSeconds <= 0) {
+      return
+    }
+
+    try {
+      await recordFocusLoss(currentSession.id, elapsedSeconds, { keepalive: options?.keepalive })
+      setSession((previous) =>
+        previous && previous.id === currentSession.id
+          ? {
+              ...previous,
+              focus_loss_count: (previous.focus_loss_count ?? 0) + 1,
+              focus_loss_seconds: (previous.focus_loss_seconds ?? 0) + elapsedSeconds,
+            }
+          : previous,
+      )
+    } catch {
+      // Best effort only; dashboard analytics can tolerate a missed event.
     }
   }
 
@@ -633,19 +676,23 @@ export default function InterviewRunPage() {
       if (document.visibilityState !== 'visible') {
         void flushPracticeDuration({ forceStop: true })
       }
+      void syncFocusLossState()
     }
 
     const handleWindowFocus = () => {
       syncPracticeTrackingState()
+      void syncFocusLossState()
     }
 
     const handleWindowBlur = () => {
       syncPracticeTrackingState()
       void flushPracticeDuration({ forceStop: true })
+      void syncFocusLossState()
     }
 
     const handlePageHide = () => {
       void flushPracticeDuration({ forceStop: true, keepalive: true })
+      void syncFocusLossState({ keepalive: true })
     }
 
     const intervalId = window.setInterval(() => {
@@ -668,6 +715,7 @@ export default function InterviewRunPage() {
       window.removeEventListener('blur', handleWindowBlur)
       window.removeEventListener('pagehide', handlePageHide)
       void flushPracticeDuration({ forceStop: true, keepalive: true })
+      void syncFocusLossState({ keepalive: true })
     }
   }, [session?.id, session?.is_completed])
 
