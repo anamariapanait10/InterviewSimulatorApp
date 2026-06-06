@@ -874,9 +874,6 @@ export default function InterviewRunPage() {
             </strong>
           </div>
           <h2>{currentPromptText}</h2>
-          <p className="support-copy">
-            Answer this part first. The orchestrator will decide whether to continue this stage or move forward.
-          </p>
 
           <div className="helper-actions">
             <button

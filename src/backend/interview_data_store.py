@@ -186,13 +186,17 @@ class InterviewEvaluationModel(BaseModel):
     coding_score: int
     communication_score: int
     overall_score: int
+    job_match_score: int | None = None
     behavioral_feedback: str
     technical_feedback: str
     coding_feedback: str
     communication_feedback: str
+    job_match_feedback: str | None = None
     summary: str
     strengths: list[str] = Field(default_factory=list)
     improvements: list[str] = Field(default_factory=list)
+    matched_requirements: list[str] = Field(default_factory=list)
+    missing_requirements: list[str] = Field(default_factory=list)
     hire_recommendation: str
     recommendation: str
 
@@ -204,6 +208,10 @@ class InterviewReportModel(BaseModel):
     behavioral_feedback: str
     technical_feedback: str
     communication_feedback: str
+    job_match_score: int | None = None
+    job_match_feedback: str | None = None
+    matched_requirements: list[str] = Field(default_factory=list)
+    missing_requirements: list[str] = Field(default_factory=list)
     recommendation: str
     question_feedback: list[InterviewQuestionFeedbackModel] = Field(default_factory=list)
     coding_feedback: str = ""

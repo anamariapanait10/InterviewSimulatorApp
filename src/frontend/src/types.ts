@@ -157,13 +157,17 @@ export interface InterviewEvaluation {
   coding_score: number
   communication_score: number
   overall_score: number
+  job_match_score: number | null
   behavioral_feedback: string
   technical_feedback: string
   coding_feedback: string
   communication_feedback: string
+  job_match_feedback: string | null
   summary: string
   strengths: string[]
   improvements: string[]
+  matched_requirements: string[]
+  missing_requirements: string[]
   hire_recommendation: string
   recommendation: string
 }
@@ -199,6 +203,10 @@ export interface InterviewReport {
   behavioral_feedback: string
   technical_feedback: string
   communication_feedback: string
+  job_match_score: number | null
+  job_match_feedback: string | null
+  matched_requirements: string[]
+  missing_requirements: string[]
   recommendation: string
   question_feedback: InterviewQuestionFeedback[]
   coding_feedback: string

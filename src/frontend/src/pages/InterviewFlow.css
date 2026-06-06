@@ -409,6 +409,41 @@
   color: var(--ink-soft);
 }
 
+.score-breakdown-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 1rem;
+}
+
+.coding-score-grid {
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+}
+
+.score-breakdown-card {
+  display: grid;
+  gap: 0.45rem;
+  padding: 1rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 1.15rem;
+  background:
+    linear-gradient(180deg, rgba(39, 52, 73, 0.92), rgba(24, 34, 51, 0.88)),
+    rgba(39, 52, 73, 0.9);
+}
+
+.score-breakdown-label {
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.score-breakdown-value {
+  color: var(--paper-strong);
+  font-size: clamp(1.4rem, 2.5vw, 2rem);
+  line-height: 1.1;
+}
+
 .coding-problem-card h3,
 .coding-editor-card h3,
 .coding-interviewer-card h3 {
