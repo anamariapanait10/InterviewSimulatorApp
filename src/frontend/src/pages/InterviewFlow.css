@@ -642,6 +642,10 @@
   align-items: stretch;
 }
 
+.coding-primary-actions.single-action {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .coding-primary-actions > .primary-button {
   width: 100%;
 }

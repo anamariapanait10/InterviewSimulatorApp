@@ -94,7 +94,6 @@ export default function InterviewRunPage() {
   const [isLoadingHint, setIsLoadingHint] = useState(false)
   const [isLoadingModelAnswer, setIsLoadingModelAnswer] = useState(false)
   const [isListening, setIsListening] = useState(false)
-  const [voiceFeedbackEnabled, setVoiceFeedbackEnabled] = useState(true)
   const [voiceStatus, setVoiceStatus] = useState<string | null>(null)
   const [voiceDraft, setVoiceDraft] = useState('')
   const sessionRef = useRef<InterviewSession | null>(null)
@@ -243,6 +242,8 @@ export default function InterviewRunPage() {
     )
   }
 
+  const isVoiceEnabled = session?.voice_enabled !== false
+
   const setLocalMicEnabled = (enabled: boolean) => {
     if (localTrackRef.current) {
       localTrackRef.current.enabled = enabled
@@ -325,7 +326,7 @@ export default function InterviewRunPage() {
 
   const speakPrompt = (prompt: string) => {
     const dataChannel = dataChannelRef.current
-    if (!prompt.trim() || !voiceFeedbackEnabled) {
+    if (!prompt.trim() || !isVoiceEnabled) {
       return
     }
 
@@ -677,6 +678,12 @@ export default function InterviewRunPage() {
   }, [session?.current_stage])
 
   useEffect(() => {
+    if (!isVoiceEnabled && (isListening || hasRealtimeConnection())) {
+      stopListeningSession('Microphone stopped')
+    }
+  }, [isVoiceEnabled, isListening])
+
+  useEffect(() => {
     const latestPrompt = session?.current_prompt?.content?.trim() ?? ''
     if (!latestPrompt) {
       return
@@ -684,14 +691,14 @@ export default function InterviewRunPage() {
     if (latestPrompt === latestPromptReadRef.current) {
       return
     }
-    if (!voiceFeedbackEnabled || !hasRealtimeConnection()) {
+    if (!isVoiceEnabled || !hasRealtimeConnection()) {
       latestPromptReadRef.current = latestPrompt
       speakPrompt(latestPrompt)
       return
     }
     latestPromptReadRef.current = latestPrompt
     speakPrompt(latestPrompt)
-  }, [session?.current_prompt?.content, voiceFeedbackEnabled, isListening])
+  }, [session?.current_prompt?.content, isVoiceEnabled, isListening])
 
   useEffect(() => {
     return () => {
@@ -888,25 +895,20 @@ export default function InterviewRunPage() {
             >
               {isLoadingModelAnswer ? 'Loading answer...' : "I Don't Know the Answer"}
             </button>
-            <button type="button" className="secondary-button" onClick={() => void toggleListening()}>
-              {isListening ? 'Stop mic' : 'Start mic'}
-            </button>
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => setVoiceFeedbackEnabled((current) => !current)}
-            >
-              {voiceFeedbackEnabled ? 'Voice On' : 'Voice Off'}
-            </button>
+            {isVoiceEnabled ? (
+              <button type="button" className="secondary-button" onClick={() => void toggleListening()}>
+                {isListening ? 'Stop mic' : 'Start mic'}
+              </button>
+            ) : null}
           </div>
 
-          {voiceStatus && !error && (
+          {isVoiceEnabled && voiceStatus && !error && (
             <p className="status-banner info" role="status">
               {voiceStatus}
             </p>
           )}
 
-          {voiceDraft && (
+          {isVoiceEnabled && voiceDraft && (
             <article className="helper-card">
               <p className="section-eyebrow">Live transcript</p>
               <p>{voiceDraft}</p>
@@ -948,13 +950,6 @@ export default function InterviewRunPage() {
             )}
 
             <div className="footer-actions">
-              <button type="submit" className="primary-button" disabled={isSubmitting}>
-                {isSubmitting
-                  ? 'Saving answer...'
-                  : session.current_stage === 'technical'
-                    ? 'Continue Interview'
-                    : 'Next Prompt'}
-              </button>
               <button
                 type="button"
                 className="secondary-button"
@@ -962,6 +957,13 @@ export default function InterviewRunPage() {
                 onClick={() => void skipQuestion()}
               >
                 {isSubmitting ? 'Working...' : 'Skip Question'}
+              </button>
+              <button type="submit" className="primary-button" disabled={isSubmitting}>
+                {isSubmitting
+                  ? 'Saving answer...'
+                  : session.current_stage === 'technical'
+                    ? 'Continue Interview'
+                    : 'Next Prompt'}
               </button>
             </div>
           </form>

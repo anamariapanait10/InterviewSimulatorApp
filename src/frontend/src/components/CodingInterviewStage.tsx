@@ -126,7 +126,6 @@ export default function CodingInterviewStage({
   const [speechDraft, setSpeechDraft] = useState('')
   const [isWorking, setIsWorking] = useState(false)
   const [isListening, setIsListening] = useState(false)
-  const [voiceFeedbackEnabled, setVoiceFeedbackEnabled] = useState(true)
   const [voiceStatus, setVoiceStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -148,7 +147,7 @@ export default function CodingInterviewStage({
   const pendingSpeechTypeRef = useRef<CodingInterviewEvent['type']>('candidate_spoke')
   const pendingSpeechTimeoutRef = useRef<number | null>(null)
   const interimTranscriptRef = useRef('')
-  const autoStartAttemptedRef = useRef(false)
+  const isVoiceEnabled = session.voice_enabled !== false
 
   useEffect(() => {
     setCode(codingRound?.current_code ?? '')
@@ -288,7 +287,7 @@ export default function CodingInterviewStage({
 
   const speakInterviewerReply = (reply: string) => {
     const dataChannel = dataChannelRef.current
-    if (!reply.trim() || !voiceFeedbackEnabled) {
+    if (!reply.trim() || !isVoiceEnabled) {
       return
     }
 
@@ -637,6 +636,12 @@ export default function CodingInterviewStage({
   }
 
   useEffect(() => {
+    if (!isVoiceEnabled && (isListening || hasRealtimeConnection())) {
+      stopListeningSession('Microphone stopped')
+    }
+  }, [isVoiceEnabled, isListening])
+
+  useEffect(() => {
     const latestReply = [...(codingRound?.conversation ?? [])]
       .reverse()
       .find((turn) => turn.role === 'interviewer')
@@ -649,24 +654,14 @@ export default function CodingInterviewStage({
       return
     }
 
-    if (!voiceFeedbackEnabled) {
+    if (!isVoiceEnabled) {
       latestQuestionRef.current = latestReply.content
       return
     }
 
     latestQuestionRef.current = latestReply.content
     speakInterviewerReply(latestReply.content)
-  }, [codingRound?.conversation, isListening, voiceFeedbackEnabled])
-
-  useEffect(() => {
-    if (!codingRound || autoStartAttemptedRef.current || isListening) {
-      return
-    }
-
-    autoStartAttemptedRef.current = true
-    shouldKeepListeningRef.current = true
-    void startListeningSession()
-  }, [codingRound?.problem?.id, isListening])
+  }, [codingRound?.conversation, isListening, isVoiceEnabled])
 
   useEffect(() => {
     if (!assistantThreadRef.current) {
@@ -889,13 +884,6 @@ export default function CodingInterviewStage({
               <p className="section-eyebrow">AI Interviewer</p>
               <h3>Short live follow-ups</h3>
             </div>
-            <button
-              type="button"
-              className="secondary-button compact-button"
-              onClick={() => setVoiceFeedbackEnabled((current) => !current)}
-            >
-              {voiceFeedbackEnabled ? 'Voice On' : 'Voice Off'}
-            </button>
           </div>
 
           <div ref={assistantThreadRef} className="assistant-thread">
@@ -959,22 +947,15 @@ export default function CodingInterviewStage({
             </button>
           </div>
 
-          <button
-            type="button"
-            className="secondary-button full-width-button"
-            disabled={isWorking}
-            onClick={() => void submitSpeech('solution_explained')}
-          >
-            Mark solution explained
-          </button>
-
-          <div className="helper-actions coding-primary-actions">
-            <button type="button" className="primary-button" onClick={() => void toggleListening()}>
-              {isListening ? 'Stop mic' : 'Start mic'}
-            </button>
+          <div className={`helper-actions coding-primary-actions ${!isVoiceEnabled ? 'single-action' : ''}`}>
+            {isVoiceEnabled ? (
+              <button type="button" className="primary-button" onClick={() => void toggleListening()}>
+                {isListening ? 'Stop mic' : 'Start mic'}
+              </button>
+            ) : null}
             <button
               type="button"
-              className="primary-button finish-round-button"
+              className={`primary-button finish-round-button ${!isVoiceEnabled ? 'full-width-button' : ''}`}
               disabled={isWorking}
               onClick={() => void finishRound()}
             >
@@ -982,7 +963,7 @@ export default function CodingInterviewStage({
             </button>
           </div>
 
-          {voiceStatus && !error && (
+          {isVoiceEnabled && voiceStatus && !error && (
             <p className="status-banner info" role="status">
               {voiceStatus}
             </p>

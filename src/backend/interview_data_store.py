@@ -227,6 +227,7 @@ class InterviewSessionModel(BaseModel):
     interview_length: str | None = None
     role_title: str | None = None
     target_company: str | None = None
+    voice_enabled: bool = False
     preferred_language: str = "typescript"
     coding_difficulty: str = "medium"
     interviewer_mode: str = "neutral"
@@ -271,6 +272,7 @@ OPTIONAL_COLUMNS: dict[str, str] = {
     "interview_length": "TEXT",
     "role_title": "TEXT",
     "target_company": "TEXT",
+    "voice_enabled": "INTEGER NOT NULL DEFAULT 0",
     "preferred_language": "TEXT NOT NULL DEFAULT 'typescript'",
     "coding_difficulty": "TEXT NOT NULL DEFAULT 'medium'",
     "interviewer_mode": "TEXT NOT NULL DEFAULT 'neutral'",
@@ -389,6 +391,7 @@ def _row_to_model(row: aiosqlite.Row) -> InterviewSessionModel:
         interview_length=row["interview_length"],
         role_title=row["role_title"],
         target_company=row["target_company"],
+        voice_enabled=bool(row["voice_enabled"]),
         preferred_language=row["preferred_language"] or "typescript",
         coding_difficulty=row["coding_difficulty"] or "medium",
         interviewer_mode=row["interviewer_mode"] or "neutral",
@@ -491,6 +494,7 @@ class InterviewSessionRepository:
                     interview_length TEXT,
                     role_title TEXT,
                     target_company TEXT,
+                    voice_enabled INTEGER NOT NULL DEFAULT 0,
                     preferred_language TEXT NOT NULL DEFAULT 'typescript',
                     coding_difficulty TEXT NOT NULL DEFAULT 'medium',
                     interviewer_mode TEXT NOT NULL DEFAULT 'neutral',
@@ -539,6 +543,7 @@ class InterviewSessionRepository:
                     interview_length,
                     role_title,
                     target_company,
+                    voice_enabled,
                     preferred_language,
                     coding_difficulty,
                     interviewer_mode,
@@ -562,7 +567,7 @@ class InterviewSessionRepository:
                     created_at,
                     updated_at,
                     completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(record.id),
@@ -580,6 +585,7 @@ class InterviewSessionRepository:
                     record.interview_length,
                     record.role_title,
                     record.target_company,
+                    int(record.voice_enabled),
                     record.preferred_language,
                     record.coding_difficulty,
                     record.interviewer_mode,
@@ -712,6 +718,7 @@ class InterviewSessionRepository:
             interview_length=pick("interview_length"),
             role_title=pick("role_title"),
             target_company=pick("target_company"),
+            voice_enabled=pick("voice_enabled"),
             preferred_language=pick("preferred_language"),
             coding_difficulty=pick("coding_difficulty"),
             interviewer_mode=pick("interviewer_mode"),
@@ -755,6 +762,7 @@ class InterviewSessionRepository:
                     interview_length = ?,
                     role_title = ?,
                     target_company = ?,
+                    voice_enabled = ?,
                     preferred_language = ?,
                     coding_difficulty = ?,
                     interviewer_mode = ?,
@@ -794,6 +802,7 @@ class InterviewSessionRepository:
                     updated_record.interview_length,
                     updated_record.role_title,
                     updated_record.target_company,
+                    int(updated_record.voice_enabled),
                     updated_record.preferred_language,
                     updated_record.coding_difficulty,
                     updated_record.interviewer_mode,

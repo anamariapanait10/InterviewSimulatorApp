@@ -222,6 +222,7 @@ class InterviewSessionModel(BaseModel):
     interview_length: str | None = None
     role_title: str | None = None
     target_company: str | None = None
+    voice_enabled: bool = False
     preferred_language: str = "typescript"
     coding_difficulty: str = "medium"
     interviewer_mode: str = "neutral"

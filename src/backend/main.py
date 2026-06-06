@@ -183,6 +183,7 @@ class InterviewCreateRequest(BaseModel):
     interview_length: str = Field(pattern="^(short|medium|long)$")
     target_company: str | None = Field(default=None, max_length=80)
     company_id: str | None = None
+    voice_enabled: bool = False
     coding_difficulty: str = Field(default="medium", pattern="^(easy|medium|hard)$")
     interviewer_mode: str = Field(default="neutral", pattern="^(warm|neutral|bar_raiser|silent)$")
     preferred_language: str = Field(default="typescript", pattern="^(typescript|javascript|python|java|csharp)$")
@@ -1636,6 +1637,7 @@ async def create_interview(
         interview_length=payload.interview_length,
         role_title=role_title_guess,
         target_company=target_company,
+        voice_enabled=payload.voice_enabled,
         preferred_language=payload.preferred_language,
         coding_difficulty=payload.coding_difficulty,
         interviewer_mode=payload.interviewer_mode,
@@ -1653,10 +1655,9 @@ async def create_interview(
         session_id=created.id,
         ui_context={"current_surface": "question_stage", "voice_enabled": False, "editor_enabled": False},
     )
-    session_payload = payload_data.get("session")
-    if not isinstance(session_payload, dict):
+    if not isinstance(payload_data.get("session"), dict):
         raise fastapi.HTTPException(status_code=502, detail="Orchestrator did not return a valid interview session")
-    return InterviewSessionModel.model_validate(session_payload)
+    return await _refresh_user_session(created.id, current_user.id)
 
 
 @app.get("/api/interviews", response_model=list[InterviewHistoryItem])
@@ -1693,10 +1694,9 @@ async def submit_interview_answer(
         user_input=payload.answer_text.strip(),
         ui_context={"current_surface": "question_stage", "voice_enabled": False, "editor_enabled": False},
     )
-    session_payload = result.get("session")
-    if not isinstance(session_payload, dict):
+    if not isinstance(result.get("session"), dict):
         raise fastapi.HTTPException(status_code=502, detail="Orchestrator did not return a valid interview session")
-    return InterviewSessionModel.model_validate(session_payload)
+    return await _refresh_user_session(session_id, current_user.id)
 
 
 @app.post("/api/interviews/{session_id}/voice-turn", response_model=InterviewSessionModel)
@@ -1719,10 +1719,9 @@ async def submit_interview_voice_turn(
         user_input=payload.transcript_text.strip(),
         ui_context={"current_surface": "question_stage", "voice_enabled": True, "editor_enabled": False},
     )
-    session_payload = result.get("session")
-    if not isinstance(session_payload, dict):
+    if not isinstance(result.get("session"), dict):
         raise fastapi.HTTPException(status_code=502, detail="Orchestrator did not return a valid interview session")
-    return InterviewSessionModel.model_validate(session_payload)
+    return await _refresh_user_session(session_id, current_user.id)
 
 
 @app.post("/api/interviews/{session_id}/skip", response_model=InterviewSessionModel)
@@ -1740,10 +1739,9 @@ async def skip_interview_question(
         session_id=session_id,
         ui_context={"current_surface": "question_stage", "voice_enabled": False, "editor_enabled": False},
     )
-    session_payload = result.get("session")
-    if not isinstance(session_payload, dict):
+    if not isinstance(result.get("session"), dict):
         raise fastapi.HTTPException(status_code=502, detail="Orchestrator did not return a valid interview session")
-    return InterviewSessionModel.model_validate(session_payload)
+    return await _refresh_user_session(session_id, current_user.id)
 
 
 @app.post("/api/interviews/{session_id}/practice-duration", response_model=InterviewSessionModel)
@@ -1842,10 +1840,9 @@ async def decide_coding_intervention(
         },
         ui_context={"current_surface": "coding_stage", "voice_enabled": True, "editor_enabled": True},
     )
-    session_payload = result.get("session")
-    if not isinstance(session_payload, dict):
+    if not isinstance(result.get("session"), dict):
         raise fastapi.HTTPException(status_code=502, detail="Orchestrator did not return a valid coding session")
-    updated_session = InterviewSessionModel.model_validate(session_payload)
+    updated_session = await _refresh_user_session(session_id, current_user.id)
     handoff = result.get("handoff") if isinstance(result.get("handoff"), dict) else {}
     return CodingInterventionResponse(
         should_interrupt=bool(result.get("interviewer_output")),
@@ -1878,10 +1875,9 @@ async def finish_interview(
             user_input=answer_text,
             ui_context={"current_surface": "question_stage", "voice_enabled": False, "editor_enabled": False},
         )
-        session_payload = result.get("session")
-        if not isinstance(session_payload, dict):
+        if not isinstance(result.get("session"), dict):
             raise fastapi.HTTPException(status_code=502, detail="Orchestrator did not return a valid interview session")
-        return InterviewSessionModel.model_validate(session_payload)
+        return await _refresh_user_session(session_id, current_user.id)
 
     result = await _post_orchestrator_action(
         action="finalize_session",
@@ -1894,10 +1890,9 @@ async def finish_interview(
         },
         ui_context={"current_surface": "summary", "voice_enabled": False, "editor_enabled": False},
     )
-    session_payload = result.get("session")
-    if not isinstance(session_payload, dict):
+    if not isinstance(result.get("session"), dict):
         raise fastapi.HTTPException(status_code=502, detail="Final evaluator did not return a valid interview session")
-    return InterviewSessionModel.model_validate(session_payload)
+    return await _refresh_user_session(session_id, current_user.id)
 
 
 @app.delete("/api/interviews/{session_id}")
@@ -1961,6 +1956,13 @@ async def _require_runtime_session(session_id: UUID) -> InterviewSessionModel:
     session = await repo.get_interview_session(session_id)
     if session is None:
         raise fastapi.HTTPException(status_code=404, detail="Session not found")
+    return session
+
+
+async def _refresh_user_session(session_id: UUID, user_id: UUID) -> InterviewSessionModel:
+    session = await repo.get_interview_session(session_id, user_id)
+    if session is None:
+        raise fastapi.HTTPException(status_code=502, detail="Orchestrator updated the interview, but the session could not be reloaded")
     return session
 
 

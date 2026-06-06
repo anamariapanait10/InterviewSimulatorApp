@@ -118,6 +118,7 @@ export default function InterviewSetupPage() {
   const [customTargetCompany, setCustomTargetCompany] = useState('')
   const [codingDifficulty, setCodingDifficulty] = useState<CodingDifficulty>('medium')
   const [interviewerMode, setInterviewerMode] = useState<InterviewerMode>('neutral')
+  const [voiceEnabled, setVoiceEnabled] = useState(false)
   const [preferredLanguage, setPreferredLanguage] = useState<PreferredLanguage>('typescript')
   const [error, setError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -201,6 +202,7 @@ export default function InterviewSetupPage() {
         interview_length: interviewLength,
         target_company: resolvedTargetCompany,
         company_id: !isCustomCompany ? selectedCompanyId || undefined : undefined,
+        voice_enabled: voiceEnabled,
         coding_difficulty: codingDifficulty,
         interviewer_mode: interviewerMode,
         preferred_language: preferredLanguage,
@@ -330,6 +332,31 @@ export default function InterviewSetupPage() {
               <option value="csharp">C#</option>
             </select>
           </div>
+        </div>
+
+        <div className="subsection-head mt-2">
+          <div>
+            <p className="section-eyebrow">Voice Mode</p>
+            <h3>Choose whether voice stays available during the interview</h3>
+          </div>
+        </div>
+        <div className="length-grid mt-2">
+          <button
+            type="button"
+            className={voiceEnabled ? 'length-option active' : 'length-option'}
+            onClick={() => setVoiceEnabled(true)}
+          >
+            <strong style={{ color: 'white' }}>Voice on</strong>
+            <span>Lets the interviewer speak and enables microphone controls during the interview.</span>
+          </button>
+          <button
+            type="button"
+            className={!voiceEnabled ? 'length-option active' : 'length-option'}
+            onClick={() => setVoiceEnabled(false)}
+          >
+            <strong style={{ color: 'white' }}>Voice off</strong>
+            <span>Keeps the interview fully text-based from start to finish.</span>
+          </button>
         </div>
 
         <div className="subsection-head mt-2">

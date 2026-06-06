@@ -109,6 +109,7 @@ export async function createInterview(payload: {
   interview_length: 'short' | 'medium' | 'long'
   target_company?: string
   company_id?: string | null
+  voice_enabled: boolean
   coding_difficulty: 'easy' | 'medium' | 'hard'
   interviewer_mode: 'warm' | 'neutral' | 'bar_raiser' | 'silent'
   preferred_language: 'typescript' | 'javascript' | 'python' | 'java' | 'csharp'

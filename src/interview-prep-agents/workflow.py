@@ -164,6 +164,62 @@ def _question_answer_review_block(session: dict[str, Any]) -> str:
     return "\n\n".join(blocks)
 
 
+def _normalize_code_for_comparison(code: str) -> str:
+    lines: list[str] = []
+    for raw_line in code.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("//") or line.startswith("#"):
+            continue
+        lines.append(" ".join(line.split()))
+    return "\n".join(lines).strip()
+
+
+def _coding_evidence_summary(session: dict[str, Any]) -> dict[str, Any]:
+    coding_round = session.get("coding_round") or {}
+    problem = coding_round.get("problem") or {}
+    language = str(coding_round.get("language") or session.get("preferred_language") or "typescript")
+    starter_map = problem.get("starter_code") or {}
+    starter_code = str(starter_map.get(language) or "")
+    current_code = str(coding_round.get("current_code") or "")
+
+    starter_normalized = _normalize_code_for_comparison(starter_code)
+    current_normalized = _normalize_code_for_comparison(current_code)
+    code_changed = bool(current_normalized) and current_normalized != starter_normalized
+
+    conversation = coding_round.get("conversation") or []
+    candidate_messages = [
+        turn for turn in conversation
+        if str(turn.get("role") or "") == "candidate" and str(turn.get("content") or "").strip()
+    ]
+    candidate_chars = sum(len(str(turn.get("content") or "").strip()) for turn in candidate_messages)
+
+    transcript = str(coding_round.get("transcript") or "").strip()
+    event_log = coding_round.get("event_log") or []
+    code_change_events = sum(
+        1
+        for event in event_log
+        if str(event.get("type") or "") == "code_changed"
+        and str(event.get("code_excerpt") or "").strip()
+    )
+
+    low_signal_explanation = candidate_chars < 140 and len(transcript) < 140
+    no_real_progress = not code_changed and code_change_events == 0
+    weak_coding_round = no_real_progress and low_signal_explanation
+
+    return {
+        "language": language,
+        "starter_code_unchanged": not code_changed,
+        "code_changed": code_changed,
+        "candidate_message_count": len(candidate_messages),
+        "candidate_message_chars": candidate_chars,
+        "transcript_chars": len(transcript),
+        "code_change_events": code_change_events,
+        "weak_coding_round": weak_coding_round,
+    }
+
+
 def _coding_mode_for_request(context: OrchestrationContext) -> str:
     if _current_stage(context.session) != "coding":
         return "select_problem"
@@ -453,6 +509,7 @@ Rules:
 def _build_final_evaluator_instructions(context: OrchestrationContext) -> str:
     session = context.session
     coding_round = session.get("coding_round") or {}
+    coding_evidence = _coding_evidence_summary(session)
     return f"""
 You are the final evaluator for a mock interview.
 
@@ -476,6 +533,15 @@ Coding conversation:
 Coding code excerpt:
 {str(coding_round.get("current_code") or "")[-5000:]}
 
+Coding evidence summary:
+- starter_code_unchanged: {coding_evidence["starter_code_unchanged"]}
+- code_changed: {coding_evidence["code_changed"]}
+- candidate_message_count: {coding_evidence["candidate_message_count"]}
+- candidate_message_chars: {coding_evidence["candidate_message_chars"]}
+- transcript_chars: {coding_evidence["transcript_chars"]}
+- code_change_events: {coding_evidence["code_change_events"]}
+- weak_coding_round: {coding_evidence["weak_coding_round"]}
+
 Question and answer review set:
 {_question_answer_review_block(session)}
 
@@ -490,7 +556,9 @@ Rules:
   - 60-69 mixed / borderline
   - 40-59 weak
   - below 40 clearly poor
-- Do not default to very low scores unless the interview evidence is clearly weak.
+- If the candidate leaves the starter code essentially unchanged, does not show a concrete implementation, or gives only a weak explanation, coding_score must stay low.
+- If the coding round shows no real implementation progress, coding_score should usually be 35 or below.
+- Do not inflate coding_score just because the candidate described a vague idea.
 - For question_feedback scores, use a 1-10 scale and give one short, concrete sentence per question.
 - Return one coherent final recommendation.
 """.strip()
@@ -760,36 +828,58 @@ async def _bootstrap_session(session_id: str) -> dict[str, Any]:
 
 
 def _build_evaluation_and_report(output: FinalEvaluationOutput, session: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    coding_evidence = _coding_evidence_summary(session)
+    guarded_output = output
+    if coding_evidence["weak_coding_round"]:
+        guarded_output = output.model_copy(
+            update={
+                "coding_score": min(output.coding_score, 35),
+                "overall_score": min(output.overall_score, 55),
+                "hire_recommendation": (
+                    output.hire_recommendation
+                    if str(output.hire_recommendation or "").strip().lower() in {"no hire", "leaning no hire"}
+                    else "No Hire"
+                ),
+            }
+        )
+    elif coding_evidence["starter_code_unchanged"]:
+        guarded_output = output.model_copy(
+            update={
+                "coding_score": min(output.coding_score, 45),
+                "overall_score": min(output.overall_score, 65),
+            }
+        )
+
     coding_evaluation = None
     coding_round = session.get("coding_round") or {}
     if coding_round.get("problem"):
         coding_evaluation = {
-            "communication": max(1, min(10, round(output.communication_score / 10))),
-            "problem_solving": max(1, min(10, round(output.coding_score / 10))),
-            "coding": max(1, min(10, round(output.coding_score / 10))),
-            "complexity_analysis": max(1, min(10, round(output.technical_score / 10))),
-            "debugging": max(1, min(10, round(output.technical_score / 10))),
-            "edge_cases": max(1, min(10, round(output.coding_score / 10))),
-            "overall_score": output.coding_score,
-            "hire_recommendation": output.hire_recommendation,
-            "summary": output.coding_feedback,
-            "strengths": output.strengths[:3],
-            "concerns": output.improvements[:3],
+            "communication": max(1, min(10, round(guarded_output.communication_score / 10))),
+            "problem_solving": max(1, min(10, round(guarded_output.coding_score / 10))),
+            "coding": max(1, min(10, round(guarded_output.coding_score / 10))),
+            "complexity_analysis": max(1, min(10, round(guarded_output.coding_score / 10))),
+            "debugging": max(1, min(10, round(guarded_output.coding_score / 10))),
+            "edge_cases": max(1, min(10, round(guarded_output.coding_score / 10))),
+            "overall_score": guarded_output.coding_score,
+            "hire_recommendation": guarded_output.hire_recommendation,
+            "summary": guarded_output.coding_feedback,
+            "strengths": guarded_output.strengths[:3],
+            "concerns": guarded_output.improvements[:3],
         }
 
-    evaluation = output.model_dump(mode="json")
+    evaluation = guarded_output.model_dump(mode="json")
     report = {
-        "summary": output.summary,
-        "strengths": output.strengths,
-        "improvements": output.improvements,
-        "behavioral_feedback": output.behavioral_feedback,
-        "technical_feedback": output.technical_feedback,
-        "communication_feedback": output.communication_feedback,
-        "recommendation": output.recommendation,
-        "question_feedback": [item.model_dump(mode="json") for item in output.question_feedback],
-        "coding_feedback": output.coding_feedback,
+        "summary": guarded_output.summary,
+        "strengths": guarded_output.strengths,
+        "improvements": guarded_output.improvements,
+        "behavioral_feedback": guarded_output.behavioral_feedback,
+        "technical_feedback": guarded_output.technical_feedback,
+        "communication_feedback": guarded_output.communication_feedback,
+        "recommendation": guarded_output.recommendation,
+        "question_feedback": [item.model_dump(mode="json") for item in guarded_output.question_feedback],
+        "coding_feedback": guarded_output.coding_feedback,
         "coding_evaluation": coding_evaluation,
-        "hire_recommendation": output.hire_recommendation,
+        "hire_recommendation": guarded_output.hire_recommendation,
     }
     return evaluation, report
 

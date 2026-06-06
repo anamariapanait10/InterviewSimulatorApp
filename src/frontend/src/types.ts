@@ -217,6 +217,7 @@ export interface InterviewSession {
   interview_length: 'short' | 'medium' | 'long' | null
   role_title: string | null
   target_company: string | null
+  voice_enabled: boolean
   preferred_language?: 'typescript' | 'javascript' | 'python' | 'java' | 'csharp'
   coding_difficulty?: 'easy' | 'medium' | 'hard'
   interviewer_mode?: 'warm' | 'neutral' | 'bar_raiser' | 'silent'
