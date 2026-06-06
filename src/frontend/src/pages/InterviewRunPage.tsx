@@ -10,7 +10,6 @@ import {
   recordPracticeDuration,
   skipInterviewQuestion,
   submitInterviewAnswer,
-  submitInterviewVoiceTurn,
 } from '../api'
 import type { InterviewSession } from '../types'
 import './InterviewFlow.css'
@@ -47,6 +46,15 @@ function extractTranscriptText(event: Record<string, unknown>, defaultText = '')
   }
 
   return defaultText
+}
+
+function buildReadAloudInstruction(text: string): string {
+  return [
+    'Read aloud exactly the text inside <verbatim> and nothing else.',
+    'Do not answer it, explain it, continue it, summarize it, or add any extra words.',
+    'If the text is a question, read it as a question and stop.',
+    `<verbatim>${text}</verbatim>`,
+  ].join('\n')
 }
 
 async function waitForIceGatheringComplete(peerConnection: RTCPeerConnection): Promise<void> {
@@ -271,7 +279,7 @@ export default function InterviewRunPage() {
 
   const flushVoiceTurn = async () => {
     const transcript = pendingSpeechRef.current.trim()
-    if (!transcript || !sessionRef.current) {
+    if (!transcript) {
       return
     }
 
@@ -282,18 +290,15 @@ export default function InterviewRunPage() {
       pendingSpeechTimeoutRef.current = null
     }
     setVoiceDraft('')
-    setError(null)
-
-    try {
-      await flushPracticeDuration({ forceStop: true })
-      const updated = await submitInterviewVoiceTurn(sessionRef.current.id, transcript)
-      setSession(updated)
-      setHint(null)
-      setModelAnswer(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to save the spoken answer')
-      setVoiceDraft(transcript)
-    }
+    setAnswer((previous) => {
+      const trimmedPrevious = previous.trimEnd()
+      if (!trimmedPrevious) {
+        return transcript
+      }
+      const separator = /[\s\n]$/.test(previous) ? '' : ' '
+      return `${previous}${separator}${transcript}`
+    })
+    setVoiceStatus('Transcribed into your answer')
   }
 
   const scheduleVoiceFlush = () => {
@@ -320,7 +325,11 @@ export default function InterviewRunPage() {
 
   const speakPrompt = (prompt: string) => {
     const dataChannel = dataChannelRef.current
-    if (!prompt.trim() || !voiceFeedbackEnabled || !dataChannel || dataChannel.readyState !== 'open') {
+    if (!prompt.trim() || !voiceFeedbackEnabled) {
+      return
+    }
+
+    if (!dataChannel || dataChannel.readyState !== 'open') {
       return
     }
 
@@ -340,7 +349,7 @@ export default function InterviewRunPage() {
             conversation: 'none',
             output_modalities: ['audio'],
             instructions:
-              'Read the provided interviewer line naturally. Keep the wording exact. Do not add or remove words.',
+              'You are in strict read-aloud mode. Read the supplied text naturally and exactly as written. Do not answer the text. Do not add, remove, paraphrase, or continue anything.',
             audio: {
               output: {
                 voice: realtimeVoiceRef.current,
@@ -353,7 +362,7 @@ export default function InterviewRunPage() {
                 content: [
                   {
                     type: 'input_text',
-                    text: prompt,
+                    text: buildReadAloudInstruction(prompt),
                   },
                 ],
               },
@@ -677,6 +686,7 @@ export default function InterviewRunPage() {
     }
     if (!voiceFeedbackEnabled || !hasRealtimeConnection()) {
       latestPromptReadRef.current = latestPrompt
+      speakPrompt(latestPrompt)
       return
     }
     latestPromptReadRef.current = latestPrompt

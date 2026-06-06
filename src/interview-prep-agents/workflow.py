@@ -42,6 +42,12 @@ class CodingOutput(BaseModel):
     selection_rationale: str | None = None
 
 
+class FinalQuestionFeedbackOutput(BaseModel):
+    question_id: str
+    score: int = Field(ge=1, le=10)
+    feedback: str
+
+
 class FinalEvaluationOutput(BaseModel):
     behavioral_score: int = Field(ge=1, le=100)
     technical_score: int = Field(ge=1, le=100)
@@ -57,6 +63,7 @@ class FinalEvaluationOutput(BaseModel):
     improvements: list[str] = Field(default_factory=list)
     hire_recommendation: str
     recommendation: str
+    question_feedback: list[FinalQuestionFeedbackOutput]
 
 
 @dataclass
@@ -127,6 +134,34 @@ def _current_question(session: dict[str, Any]) -> dict[str, Any] | None:
     if 0 <= current_index < len(questions):
         return questions[current_index]
     return None
+
+
+def _question_answer_review_block(session: dict[str, Any]) -> str:
+    questions = session.get("questions") or []
+    answers = session.get("answers") or []
+    answers_by_question_id = {
+        str(answer.get("question_id")): str(answer.get("answer_text") or "").strip()
+        for answer in answers
+        if answer.get("question_id")
+    }
+
+    if not questions:
+        return "No pre-coding questions were recorded."
+
+    blocks: list[str] = []
+    for question in questions:
+        question_id = str(question.get("id") or "")
+        category = str(question.get("category") or "unknown")
+        prompt = str(question.get("prompt") or "").strip()
+        answer_text = answers_by_question_id.get(question_id) or "[No answer recorded]"
+        blocks.append(
+            f"Question ID: {question_id}\n"
+            f"Category: {category}\n"
+            f"Prompt: {prompt}\n"
+            f"Answer: {answer_text}"
+        )
+
+    return "\n\n".join(blocks)
 
 
 def _coding_mode_for_request(context: OrchestrationContext) -> str:
@@ -282,9 +317,10 @@ Company context:
 {session.get("company_context") or "No additional company context provided."}
 
 Rules:
-- For hint, be short and directional without giving the full answer.
-- For model_answer, provide a polished answer that fits the current stage.
+- For hint, use at most 2 short sentences and do not give the full answer.
+- For model_answer, use at most 4 short sentences and keep it practical.
 - Stay tightly scoped to the current active prompt.
+- Return plain text only. Do not use markdown, bullets, numbering, headings, or code fences.
 """.strip()
 
 
@@ -440,9 +476,22 @@ Coding conversation:
 Coding code excerpt:
 {str(coding_round.get("current_code") or "")[-5000:]}
 
+Question and answer review set:
+{_question_answer_review_block(session)}
+
 Rules:
 - Produce stage-specific feedback for behavioral, technical, coding, and communication.
+- Provide question_feedback for every recorded pre-coding question using the exact question_id values above.
 - Score each section fairly and pragmatically.
+- Use this calibration:
+  - 90-100 exceptional
+  - 80-89 strong
+  - 70-79 solid
+  - 60-69 mixed / borderline
+  - 40-59 weak
+  - below 40 clearly poor
+- Do not default to very low scores unless the interview evidence is clearly weak.
+- For question_feedback scores, use a 1-10 scale and give one short, concrete sentence per question.
 - Return one coherent final recommendation.
 """.strip()
 
@@ -737,7 +786,7 @@ def _build_evaluation_and_report(output: FinalEvaluationOutput, session: dict[st
         "technical_feedback": output.technical_feedback,
         "communication_feedback": output.communication_feedback,
         "recommendation": output.recommendation,
-        "question_feedback": [],
+        "question_feedback": [item.model_dump(mode="json") for item in output.question_feedback],
         "coding_feedback": output.coding_feedback,
         "coding_evaluation": coding_evaluation,
         "hire_recommendation": output.hire_recommendation,
@@ -989,12 +1038,13 @@ async def handle_orchestrator_action(
         await _store_record_handoff(session_id, latest_handoff)
         if not isinstance(specialist_output, SupportOutput):
             raise RuntimeError("Expected support output for help request")
+        support_content = specialist_output.content.strip()
         current_question = _current_question(session)
         support_entry = {
             "mode": specialist_output.support_mode,
             "stage": _current_stage(session),
             "question_id": current_question.get("id") if current_question else None,
-            "content": specialist_output.content,
+            "content": support_content,
         }
         session = await _store_save_support(session_id, support_entry)
         session = await _store_append_turn(
@@ -1004,7 +1054,7 @@ async def handle_orchestrator_action(
                 "role": "interviewer",
                 "agent_name": latest_handoff["to_agent"],
                 "kind": specialist_output.support_mode,
-                "content": specialist_output.content,
+                "content": support_content,
                 "metadata": {},
             },
         )
@@ -1012,7 +1062,7 @@ async def handle_orchestrator_action(
             "stage": session.get("current_stage"),
             "active_agent": session.get("active_agent"),
             "handoff": latest_handoff,
-            "interviewer_output": specialist_output.content,
+            "interviewer_output": support_content,
             "next_prompt": session.get("current_prompt"),
             "ui_patch": {},
             "decision_trace_entry": session.get("decision_trace", [])[-1] if session.get("decision_trace") else None,
@@ -1020,7 +1070,7 @@ async def handle_orchestrator_action(
             "is_interview_complete": False,
             "session": session,
             "final_report": None,
-            "support_content": specialist_output.content,
+            "support_content": support_content,
         }
 
     if action in {"voice_turn", "resume_stage"} and _current_stage(session) == "coding":

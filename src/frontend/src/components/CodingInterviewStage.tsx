@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import CodeEditor from './CodeEditor'
 import { createCodingRealtimeSession, decideCodingIntervention, finishInterview } from '../api'
-import type { CodingInterviewEvent, InterviewSession } from '../types'
+import type { CodingConversationTurn, CodingInterviewEvent, InterviewSession } from '../types'
 
 interface CodingInterviewStageProps {
   session: InterviewSession
@@ -69,6 +69,29 @@ function extractTranscriptText(event: Record<string, unknown>, defaultText = '')
   return defaultText
 }
 
+function buildCandidateConversationTurn(
+  content: string,
+  sourceEventType: CodingInterviewEvent['type'],
+): CodingConversationTurn {
+  return {
+    role: 'candidate',
+    content,
+    created_at: new Date().toISOString(),
+    kind: 'message',
+    source_event_type: sourceEventType,
+    severity: null,
+  }
+}
+
+function buildReadAloudInstruction(text: string): string {
+  return [
+    'Read aloud exactly the text inside <verbatim> and nothing else.',
+    'Do not answer it, explain it, continue it, summarize it, or add any extra words.',
+    'If the text is a question, read it as a question and stop.',
+    `<verbatim>${text}</verbatim>`,
+  ].join('\n')
+}
+
 async function waitForIceGatheringComplete(peerConnection: RTCPeerConnection): Promise<void> {
   if (peerConnection.iceGatheringState === 'complete') {
     return
@@ -125,6 +148,7 @@ export default function CodingInterviewStage({
   const pendingSpeechTypeRef = useRef<CodingInterviewEvent['type']>('candidate_spoke')
   const pendingSpeechTimeoutRef = useRef<number | null>(null)
   const interimTranscriptRef = useRef('')
+  const autoStartAttemptedRef = useRef(false)
 
   useEffect(() => {
     setCode(codingRound?.current_code ?? '')
@@ -264,7 +288,11 @@ export default function CodingInterviewStage({
 
   const speakInterviewerReply = (reply: string) => {
     const dataChannel = dataChannelRef.current
-    if (!reply.trim() || !voiceFeedbackEnabled || !dataChannel || dataChannel.readyState !== 'open') {
+    if (!reply.trim() || !voiceFeedbackEnabled) {
+      return
+    }
+
+    if (!dataChannel || dataChannel.readyState !== 'open') {
       return
     }
 
@@ -286,7 +314,7 @@ export default function CodingInterviewStage({
             conversation: 'none',
             output_modalities: ['audio'],
             instructions:
-              'Read the provided interviewer line naturally. Keep the wording exact. Do not add or remove words.',
+              'You are in strict read-aloud mode. Read the supplied text naturally and exactly as written. Do not answer the text. Do not add, remove, paraphrase, or continue anything.',
             audio: {
               output: {
                 voice: realtimeVoiceRef.current,
@@ -299,7 +327,7 @@ export default function CodingInterviewStage({
                 content: [
                   {
                     type: 'input_text',
-                    text: reply,
+                    text: buildReadAloudInstruction(reply),
                   },
                 ],
               },
@@ -586,6 +614,18 @@ export default function CodingInterviewStage({
       eventType ?? (looksLikeClarification(trimmed) ? 'clarification_asked' : 'candidate_spoke')
 
     lastActivityAtRef.current = Date.now()
+    if (session.coding_round) {
+      onSessionChange({
+        ...session,
+        coding_round: {
+          ...session.coding_round,
+          conversation: [
+            ...session.coding_round.conversation,
+            buildCandidateConversationTurn(trimmed, resolvedEventType),
+          ],
+        },
+      })
+    }
     setSpeechDraft('')
     await sendEvent(
       buildEvent(resolvedEventType, {
@@ -614,13 +654,19 @@ export default function CodingInterviewStage({
       return
     }
 
-    if (!hasRealtimeConnection()) {
-      return
-    }
-
     latestQuestionRef.current = latestReply.content
     speakInterviewerReply(latestReply.content)
   }, [codingRound?.conversation, isListening, voiceFeedbackEnabled])
+
+  useEffect(() => {
+    if (!codingRound || autoStartAttemptedRef.current || isListening) {
+      return
+    }
+
+    autoStartAttemptedRef.current = true
+    shouldKeepListeningRef.current = true
+    void startListeningSession()
+  }, [codingRound?.problem?.id, isListening])
 
   useEffect(() => {
     if (!assistantThreadRef.current) {

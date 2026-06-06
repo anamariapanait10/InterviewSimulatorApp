@@ -1,7 +1,7 @@
-#:sdk Aspire.AppHost.Sdk@13.4.0
-#:package Aspire.Hosting.JavaScript@13.4.0
-#:package Aspire.Hosting.Python@13.4.0
-#:package Aspire.Hosting.GitHub.Models@13.4.0
+#:sdk Aspire.AppHost.Sdk@13.4.2
+#:package Aspire.Hosting.JavaScript@13.4.2
+#:package Aspire.Hosting.Python@13.4.2
+#:package Aspire.Hosting.GitHub.Models@13.4.2
 #:package CommunityToolkit.Aspire.Hosting.SQLite@13.*
 #:package Microsoft.Extensions.Configuration.Json@10.*
 

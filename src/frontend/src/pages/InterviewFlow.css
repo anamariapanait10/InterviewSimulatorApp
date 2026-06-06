@@ -123,6 +123,8 @@
 .info-grid,
 .setup-grid,
 .length-grid,
+.triple-option-grid,
+.quad-option-grid,
 .summary-columns,
 .narrative-grid,
 .history-grid,
@@ -149,6 +151,14 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.triple-option-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.quad-option-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .coding-workbench {
   grid-template-columns: minmax(0, 3fr) minmax(20rem, 2fr);
   align-items: stretch;
@@ -163,6 +173,15 @@
 .question-review-item h3,
 .history-card h2 {
   font-size: 1.3rem;
+}
+
+.subsection-head {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.subsection-head h3 {
+  font-size: 1.2rem;
 }
 
 .feature-card p,
@@ -971,6 +990,8 @@
   .info-grid,
   .setup-grid,
   .length-grid,
+  .triple-option-grid,
+  .quad-option-grid,
   .summary-columns,
   .narrative-grid,
   .history-grid,
@@ -1049,9 +1070,22 @@
 .companies-main,
 .company-form,
 .company-list,
-.company-select-wrap {
+.company-select-wrap,
+.form-field-stack {
   display: grid;
+}
+
+.companies-sidebar,
+.companies-main,
+.company-form,
+.company-list,
+.company-select-wrap {
   gap: 1rem;
+}
+
+.form-field-stack {
+  align-content: start;
+  gap: 0.6rem;
 }
 
 .companies-main {

@@ -113,9 +113,9 @@ export default function InterviewSetupPage() {
     isParsing: false,
   })
   const [interviewLength, setInterviewLength] = useState<InterviewLength>('medium')
-  const [targetCompany, setTargetCompany] = useState('')
   const [companies, setCompanies] = useState<Company[]>([])
-  const [selectedCompanyId, setSelectedCompanyId] = useState('')
+  const [selectedCompanyId, setSelectedCompanyId] = useState('__custom__')
+  const [customTargetCompany, setCustomTargetCompany] = useState('')
   const [codingDifficulty, setCodingDifficulty] = useState<CodingDifficulty>('medium')
   const [interviewerMode, setInterviewerMode] = useState<InterviewerMode>('neutral')
   const [preferredLanguage, setPreferredLanguage] = useState<PreferredLanguage>('typescript')
@@ -146,6 +146,10 @@ export default function InterviewSetupPage() {
   }, [])
 
   const selectedCompany = companies.find((company) => company.id === selectedCompanyId) ?? null
+  const isCustomCompany = selectedCompanyId === '__custom__'
+  const resolvedTargetCompany = isCustomCompany
+    ? customTargetCompany.trim()
+    : (selectedCompany?.name ?? '').trim()
 
   const handleFileParse = async (
     file: File | undefined,
@@ -182,6 +186,11 @@ export default function InterviewSetupPage() {
       return
     }
 
+    if (!resolvedTargetCompany) {
+      setError('Choose a target company or enter a custom company before starting the interview.')
+      return
+    }
+
     setError(null)
     setIsSubmitting(true)
 
@@ -190,8 +199,8 @@ export default function InterviewSetupPage() {
         resume_text: resumeText,
         job_description_text: jobDescriptionText,
         interview_length: interviewLength,
-        target_company: targetCompany.trim() || selectedCompany?.name || undefined,
-        company_id: selectedCompanyId || undefined,
+        target_company: resolvedTargetCompany,
+        company_id: !isCustomCompany ? selectedCompanyId || undefined : undefined,
         coding_difficulty: codingDifficulty,
         interviewer_mode: interviewerMode,
         preferred_language: preferredLanguage,
@@ -268,42 +277,43 @@ export default function InterviewSetupPage() {
 
         <div className="setup-grid coding-config-grid">
           <div className="company-select-wrap">
-            <label htmlFor="company-select" className="field-label">
-              Company knowledge workspace
-            </label>
-            <select
-              id="company-select"
-              className="text-input"
-              value={selectedCompanyId}
-              onChange={(event) => setSelectedCompanyId(event.target.value)}
-            >
-              <option value="">No company knowledge selected</option>
-              {companies.map((company) => (
-                <option key={company.id} value={company.id}>
-                  {company.name}
-                </option>
-              ))}
-            </select>
+            <div className="form-field-stack">
+              <label htmlFor="company-select" className="field-label">
+                Target company
+              </label>
+              <select
+                id="company-select"
+                className="text-input"
+                value={selectedCompanyId}
+                onChange={(event) => setSelectedCompanyId(event.target.value)}
+              >
+                <option value="__custom__">Custom...</option>
+                {companies.map((company) => (
+                  <option key={company.id} value={company.id}>
+                    {company.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {isCustomCompany ? (
+              <div className="form-field-stack">
+                <input
+                  id="company-input"
+                  className="text-input"
+                  value={customTargetCompany}
+                  onChange={(event) => setCustomTargetCompany(event.target.value)}
+                  placeholder="Google, Meta, Amazon..."
+                />
+              </div>
+            ) : null}
             <p className="support-copy mt-2">
-              Select a saved company to inject indexed interview knowledge into question generation.
-            </p>
-
-            <label htmlFor="company-input" className="field-label">
-              Coding round target company
-            </label>
-            <input
-              id="company-input"
-              className="text-input"
-              value={targetCompany}
-              onChange={(event) => setTargetCompany(event.target.value)}
-              placeholder={selectedCompany?.name ?? 'Google, Meta, Amazon...'}
-            />
-            <p className="support-copy mt-2">
-              Leave this blank to reuse the selected company above, or type a custom company for coding-bank matching.
+              {isCustomCompany
+                ? 'Enter a custom company name for interview style and coding problem matching.'
+                : 'Uses the saved company knowledge workspace and the same company name for coding problem selection.'}
             </p>
           </div>
 
-          <div>
+          <div className="form-field-stack">
             <label htmlFor="language-select" className="field-label">
               Preferred language
             </label>
@@ -322,7 +332,13 @@ export default function InterviewSetupPage() {
           </div>
         </div>
 
-        <div className="length-grid mt-2">
+        <div className="subsection-head mt-2">
+          <div>
+            <p className="section-eyebrow">Coding Difficulty</p>
+            <h3>Choose the coding challenge level</h3>
+          </div>
+        </div>
+        <div className="triple-option-grid mt-2">
           {(['easy', 'medium', 'hard'] as CodingDifficulty[]).map((option) => (
             <button
               key={option}
@@ -340,7 +356,13 @@ export default function InterviewSetupPage() {
           ))}
         </div>
 
-        <div className="length-grid mt-2">
+        <div className="subsection-head mt-2">
+          <div>
+            <p className="section-eyebrow">Interviewer Style</p>
+            <h3>Choose how strict the interviewer feels</h3>
+          </div>
+        </div>
+        <div className="quad-option-grid mt-2">
           {(['warm', 'neutral', 'bar_raiser', 'silent'] as InterviewerMode[]).map((option) => (
             <button
               key={option}
