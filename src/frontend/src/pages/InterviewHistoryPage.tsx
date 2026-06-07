@@ -115,7 +115,10 @@ export default function InterviewHistoryPage() {
               </div>
               <p className="history-date">{new Date(item.created_at).toLocaleString()}</p>
               <div className="history-actions">
-                <NavLink to={`/interviews/${item.id}/details`} className="secondary-button">
+                <NavLink
+                  to={`/interviews/${item.id}/${item.is_completed ? 'details' : 'run'}`}
+                  className="secondary-button"
+                >
                   Open
                 </NavLink>
                 <button

@@ -117,6 +117,9 @@ class CodingInterviewRoundModel(BaseModel):
     event_log: list[CodingInterviewEventModel] = Field(default_factory=list)
     conversation: list[CodingConversationTurnModel] = Field(default_factory=list)
     interventions: list[CodingInterventionModel] = Field(default_factory=list)
+    implementation_transition_sent: bool = False
+    wrap_up_question_asked: bool = False
+    wrap_up_completed: bool = False
     cooldown_seconds: int = 40
     last_intervention_at: datetime | None = None
     latest_reason: str | None = None

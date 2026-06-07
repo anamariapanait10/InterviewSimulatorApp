@@ -498,7 +498,7 @@ export default function HomePage() {
                   <strong>{history.length}</strong>
                   <span>{completedCount} completed</span>
                 </article>
-                <article className="dashboard-stat-card spotlight">
+                <article className="dashboard-stat-card">
                   <p>Average score</p>
                   <strong>{averageScore ?? '--'}</strong>
                   <span>

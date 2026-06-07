@@ -306,6 +306,14 @@ export async function decideCodingIntervention(
   return parseJson<CodingInterventionResponse>(response)
 }
 
+export async function resumeCodingStage(sessionId: string): Promise<InterviewSession> {
+  const response = await fetch(`/api/interviews/${sessionId}/coding/resume`, {
+    method: 'POST',
+    headers: withAuthHeaders(),
+  })
+  return parseJson<InterviewSession>(response)
+}
+
 export async function createCodingRealtimeSession(
   sessionId: string,
   payload: {

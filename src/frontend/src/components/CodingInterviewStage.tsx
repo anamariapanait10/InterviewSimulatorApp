@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import CodeEditor from './CodeEditor'
-import { createCodingRealtimeSession, decideCodingIntervention, finishInterview } from '../api'
+import { createCodingRealtimeSession, decideCodingIntervention, finishInterview, resumeCodingStage } from '../api'
 import type { CodingConversationTurn, CodingInterviewEvent, InterviewSession } from '../types'
 
 interface CodingInterviewStageProps {
@@ -9,8 +9,10 @@ interface CodingInterviewStageProps {
 }
 
 const LONG_PAUSE_THRESHOLD_MS = 45_000
-const SPEECH_SETTLE_MS = 5_000
+const SPEECH_SETTLE_MS = 4_500
 const INTERVIEWER_AUDIO_RESUME_DELAY_MS = 400
+const READING_GRACE_PERIOD_MS = 10_000
+const INTERVIEWER_SPEAKING_WATCHDOG_MS = 12_000
 
 function buildEvent(
   type: CodingInterviewEvent['type'],
@@ -92,6 +94,15 @@ function buildReadAloudInstruction(text: string): string {
   ].join('\n')
 }
 
+function buildProblemReadAloudText(session: InterviewSession): string {
+  const problem = session.coding_round?.problem
+  if (!problem) {
+    return ''
+  }
+
+  return [`Coding problem: ${problem.title}.`, problem.prompt].filter(Boolean).join(' ')
+}
+
 async function waitForIceGatheringComplete(peerConnection: RTCPeerConnection): Promise<void> {
   if (peerConnection.iceGatheringState === 'complete') {
     return
@@ -138,21 +149,61 @@ export default function CodingInterviewStage({
   const realtimeVoiceRef = useRef('marin')
   const realtimeTranscriptionModelRef = useRef('gpt-realtime-whisper')
   const shouldKeepListeningRef = useRef(false)
+  const autoVoiceStartedRef = useRef<string | null>(null)
+  const readingPromptTimerRef = useRef<number | null>(null)
   const speakingResponseActiveRef = useRef(false)
-  const latestQuestionRef = useRef('')
+  const micStreamingRef = useRef(false)
+  const latestSpokenTurnRef = useRef('')
   const lastActivityAtRef = useRef(Date.now())
   const lastPauseAtRef = useRef(0)
   const lastCodeSentRef = useRef(code)
+  const localCodeRef = useRef(code)
+  const syncedProblemIdRef = useRef<string | null>(codingRound?.problem?.id ?? null)
   const pendingSpeechRef = useRef('')
   const pendingSpeechTypeRef = useRef<CodingInterviewEvent['type']>('candidate_spoke')
   const pendingSpeechTimeoutRef = useRef<number | null>(null)
   const interimTranscriptRef = useRef('')
+  const interviewerSpeakingWatchdogRef = useRef<number | null>(null)
+  const problemReadAloudRef = useRef<string | null>(null)
+  const pendingSpeechResumeMarkerRef = useRef(false)
   const isVoiceEnabled = session.voice_enabled !== false
 
   useEffect(() => {
-    setCode(codingRound?.current_code ?? '')
-    setLanguage(codingRound?.language ?? 'typescript')
-  }, [codingRound?.current_code, codingRound?.language])
+    const incomingCode = codingRound?.current_code ?? ''
+    const incomingLanguage = codingRound?.language ?? 'typescript'
+    const incomingProblemId = codingRound?.problem?.id ?? null
+
+    setLanguage(incomingLanguage)
+
+    if (incomingProblemId !== syncedProblemIdRef.current) {
+      syncedProblemIdRef.current = incomingProblemId
+      localCodeRef.current = incomingCode
+      lastCodeSentRef.current = incomingCode
+      setCode(incomingCode)
+      return
+    }
+
+    if (incomingCode === localCodeRef.current) {
+      lastCodeSentRef.current = incomingCode
+      return
+    }
+
+    if (incomingCode !== lastCodeSentRef.current) {
+      logRealtimeDebugEvent(
+        'editor.ignore_stale_server_code',
+        `incoming=${incomingCode.length}; lastSent=${lastCodeSentRef.current.length}; local=${localCodeRef.current.length}`,
+      )
+      return
+    }
+
+    if (localCodeRef.current !== lastCodeSentRef.current) {
+      return
+    }
+
+    localCodeRef.current = incomingCode
+    lastCodeSentRef.current = incomingCode
+    setCode(incomingCode)
+  }, [codingRound?.current_code, codingRound?.language, codingRound?.problem?.id])
 
   const startedAtMs = useMemo(() => {
     if (!codingRound) {
@@ -175,9 +226,81 @@ export default function CodingInterviewStage({
   }
 
   const setLocalMicEnabled = (enabled: boolean) => {
+    logRealtimeDebugEvent('rtc.mic_track', enabled ? 'enabled' : 'disabled')
     if (localTrackRef.current) {
       localTrackRef.current.enabled = enabled
     }
+    localStreamRef.current?.getAudioTracks().forEach((track) => {
+      track.enabled = enabled
+    })
+  }
+
+  const clearReadingPromptTimer = () => {
+    if (readingPromptTimerRef.current !== null) {
+      window.clearTimeout(readingPromptTimerRef.current)
+      readingPromptTimerRef.current = null
+    }
+  }
+
+  const clearInterviewerSpeakingWatchdog = () => {
+    if (interviewerSpeakingWatchdogRef.current !== null) {
+      window.clearTimeout(interviewerSpeakingWatchdogRef.current)
+      interviewerSpeakingWatchdogRef.current = null
+    }
+  }
+
+  const logRealtimeDebugEvent = (type: string, details?: string) => {
+    const timestamp = new Date().toISOString()
+    if (details) {
+      console.log(`[coding-voice][${timestamp}] ${type}: ${details}`)
+      return
+    }
+    console.log(`[coding-voice][${timestamp}] ${type}`)
+  }
+
+  const updateVoiceStatus = (nextStatus: string | null) => {
+    setVoiceStatus(nextStatus)
+    logRealtimeDebugEvent('ui.voice_status', nextStatus ?? 'null')
+  }
+
+  const updateListeningState = (nextListening: boolean) => {
+    setIsListening(nextListening)
+    logRealtimeDebugEvent('ui.is_listening', nextListening ? 'true' : 'false')
+  }
+
+  const restoreAfterInterviewerSpeech = () => {
+    clearInterviewerSpeakingWatchdog()
+    speakingResponseActiveRef.current = false
+    lastActivityAtRef.current = Date.now()
+    window.setTimeout(() => {
+      const canResume =
+        shouldKeepListeningRef.current ||
+        (dataChannelRef.current !== null && dataChannelRef.current.readyState === 'open')
+      logRealtimeDebugEvent(
+        'ui.restore_after_speech_attempt',
+        `canResume=${canResume}; keep=${shouldKeepListeningRef.current}; mic=${micStreamingRef.current}; channel=${dataChannelRef.current?.readyState ?? 'none'}`,
+      )
+      if (!canResume) {
+        return
+      }
+      setLocalMicEnabled(micStreamingRef.current)
+      updateListeningState(micStreamingRef.current)
+      updateVoiceStatus(micStreamingRef.current ? 'Listening' : 'Voice ready')
+      logRealtimeDebugEvent('ui.restore_after_speech_applied', micStreamingRef.current ? 'listening' : 'voice_ready')
+    }, INTERVIEWER_AUDIO_RESUME_DELAY_MS)
+  }
+
+  const armInterviewerSpeakingWatchdog = () => {
+    clearInterviewerSpeakingWatchdog()
+    logRealtimeDebugEvent('ui.speaking_watchdog_armed')
+    interviewerSpeakingWatchdogRef.current = window.setTimeout(() => {
+      interviewerSpeakingWatchdogRef.current = null
+      if (!speakingResponseActiveRef.current) {
+        return
+      }
+      logRealtimeDebugEvent('ui.speaking_watchdog_fired')
+      restoreAfterInterviewerSpeech()
+    }, INTERVIEWER_SPEAKING_WATCHDOG_MS)
   }
 
   const sendEvent = async (
@@ -188,12 +311,23 @@ export default function CodingInterviewStage({
       return
     }
 
+    const currentCode = localCodeRef.current
+
+    if (transcriptRecent.trim()) {
+      clearReadingPromptTimer()
+    }
+
     setIsWorking(true)
     setError(null)
+    const startedAt = performance.now()
+    logRealtimeDebugEvent(
+      'app.send_event.start',
+      `type=${event.type}; transcriptChars=${transcriptRecent.length}; codeChars=${currentCode.length}`,
+    )
     try {
       const response = await decideCodingIntervention(session.id, {
         problem_id: codingRound.problem.id,
-        code,
+        code: currentCode,
         language,
         transcript_recent: transcriptRecent,
         recent_events: [event],
@@ -206,7 +340,15 @@ export default function CodingInterviewStage({
       if (response.reply) {
         setVoiceStatus(hasRealtimeConnection() ? 'Interviewer replied' : 'Interviewer replied in chat')
       }
+      logRealtimeDebugEvent(
+        'app.send_event.done',
+        `type=${event.type}; durationMs=${Math.round(performance.now() - startedAt)}; hasReply=${response.reply ? 'true' : 'false'}`,
+      )
     } catch (err) {
+      logRealtimeDebugEvent(
+        'app.send_event.error',
+        `type=${event.type}; durationMs=${Math.round(performance.now() - startedAt)}; message=${err instanceof Error ? err.message : 'unknown error'}`,
+      )
       setError(err instanceof Error ? err.message : 'Unable to update the coding round')
     } finally {
       setIsWorking(false)
@@ -220,8 +362,10 @@ export default function CodingInterviewStage({
     }
 
     const eventType = pendingSpeechTypeRef.current
+    logRealtimeDebugEvent('speech.flush.start', `type=${eventType}; transcriptChars=${transcript.length}`)
     pendingSpeechRef.current = ''
     pendingSpeechTypeRef.current = 'candidate_spoke'
+    pendingSpeechResumeMarkerRef.current = false
     interimTranscriptRef.current = ''
     if (pendingSpeechTimeoutRef.current !== null) {
       window.clearTimeout(pendingSpeechTimeoutRef.current)
@@ -232,7 +376,7 @@ export default function CodingInterviewStage({
     await sendEvent(
       buildEvent(eventType, {
         transcript_excerpt: transcript,
-        code_excerpt: code.slice(-600),
+        code_excerpt: localCodeRef.current.slice(-600),
       }),
       transcript,
     )
@@ -244,8 +388,12 @@ export default function CodingInterviewStage({
       window.clearTimeout(pendingSpeechTimeoutRef.current)
     }
 
+    pendingSpeechResumeMarkerRef.current = false
+    logRealtimeDebugEvent('speech.flush.scheduled', `delayMs=${SPEECH_SETTLE_MS}`)
     pendingSpeechTimeoutRef.current = window.setTimeout(() => {
       pendingSpeechTimeoutRef.current = null
+      pendingSpeechResumeMarkerRef.current = false
+      logRealtimeDebugEvent('speech.flush.fire')
       void flushPendingSpeech()
     }, SPEECH_SETTLE_MS)
   }
@@ -267,14 +415,18 @@ export default function CodingInterviewStage({
     }
 
     speakingResponseActiveRef.current = false
-    setIsListening(false)
+    clearInterviewerSpeakingWatchdog()
+    logRealtimeDebugEvent('ui.close_realtime_resources', status)
+    updateListeningState(false)
+    micStreamingRef.current = false
     if (status) {
-      setVoiceStatus(status)
+      updateVoiceStatus(status)
     }
   }
 
   const stopListeningSession = (status?: string) => {
     shouldKeepListeningRef.current = false
+    clearReadingPromptTimer()
     if (pendingSpeechTimeoutRef.current !== null) {
       window.clearTimeout(pendingSpeechTimeoutRef.current)
       pendingSpeechTimeoutRef.current = null
@@ -304,7 +456,9 @@ export default function CodingInterviewStage({
       speakingResponseActiveRef.current = true
       lastActivityAtRef.current = Date.now()
       setLocalMicEnabled(false)
-      setVoiceStatus('Interviewer speaking')
+      updateVoiceStatus('Interviewer speaking')
+      logRealtimeDebugEvent('ui.speak_interviewer_reply', reply.slice(0, 80))
+      armInterviewerSpeakingWatchdog()
 
       dataChannel.send(
         JSON.stringify({
@@ -336,8 +490,8 @@ export default function CodingInterviewStage({
       )
     } catch {
       speakingResponseActiveRef.current = false
-      setLocalMicEnabled(true)
-      setVoiceStatus('Unable to play interviewer audio')
+      setLocalMicEnabled(micStreamingRef.current)
+      updateVoiceStatus('Unable to play interviewer audio')
     }
   }
 
@@ -379,18 +533,34 @@ export default function CodingInterviewStage({
 
   const handleRealtimeServerEvent = (event: Record<string, unknown>) => {
     const eventType = typeof event.type === 'string' ? event.type : ''
+    logRealtimeDebugEvent(
+      eventType || 'unknown',
+      eventType === 'error'
+        ? (
+            typeof event.error === 'string'
+              ? event.error
+              : isRecord(event.error) && typeof event.error.message === 'string'
+                ? event.error.message
+                : undefined
+          )
+        : undefined,
+    )
     switch (eventType) {
       case 'input_audio_buffer.speech_started': {
+        if (pendingSpeechTimeoutRef.current !== null) {
+          pendingSpeechResumeMarkerRef.current = true
+          logRealtimeDebugEvent('speech.flush.resume_detected')
+        }
         lastActivityAtRef.current = Date.now()
         if (!speakingResponseActiveRef.current) {
-          setVoiceStatus('Listening')
+          updateVoiceStatus('Listening')
         }
         break
       }
       case 'input_audio_buffer.speech_stopped': {
         lastActivityAtRef.current = Date.now()
         if (!speakingResponseActiveRef.current) {
-          setVoiceStatus('Processing speech')
+          updateVoiceStatus('Processing speech')
         }
         break
       }
@@ -398,6 +568,12 @@ export default function CodingInterviewStage({
         const delta = extractTranscriptText(event)
         if (!delta) {
           break
+        }
+        if (pendingSpeechTimeoutRef.current !== null && pendingSpeechResumeMarkerRef.current) {
+          window.clearTimeout(pendingSpeechTimeoutRef.current)
+          pendingSpeechTimeoutRef.current = null
+          pendingSpeechResumeMarkerRef.current = false
+          logRealtimeDebugEvent('speech.flush.cancelled_on_new_transcript')
         }
         interimTranscriptRef.current = `${interimTranscriptRef.current}${delta}`
         lastActivityAtRef.current = Date.now()
@@ -411,6 +587,12 @@ export default function CodingInterviewStage({
           syncDraftFromRealtimeBuffer()
           break
         }
+        if (pendingSpeechTimeoutRef.current !== null && pendingSpeechResumeMarkerRef.current) {
+          window.clearTimeout(pendingSpeechTimeoutRef.current)
+          pendingSpeechTimeoutRef.current = null
+          pendingSpeechResumeMarkerRef.current = false
+          logRealtimeDebugEvent('speech.flush.cancelled_on_completed_transcript')
+        }
 
         const nextTranscript = pendingSpeechRef.current
           ? `${pendingSpeechRef.current} ${transcript}`.trim()
@@ -421,7 +603,7 @@ export default function CodingInterviewStage({
         pendingSpeechRef.current = nextTranscript
         pendingSpeechTypeRef.current = clarificationDetected ? 'clarification_asked' : 'candidate_spoke'
         lastActivityAtRef.current = Date.now()
-        setVoiceStatus('Listening')
+        updateVoiceStatus('Listening')
         syncDraftFromRealtimeBuffer()
         schedulePendingSpeechFlush()
         break
@@ -441,26 +623,22 @@ export default function CodingInterviewStage({
               : `Realtime audio response ended with status: ${status}`
           setError(realtimeMessage)
         }
+        if (speakingResponseActiveRef.current) {
+          restoreAfterInterviewerSpeech()
+        }
         break
       }
       case 'output_audio_buffer.started': {
         speakingResponseActiveRef.current = true
         lastActivityAtRef.current = Date.now()
         setLocalMicEnabled(false)
-        setVoiceStatus('Interviewer speaking')
+        updateVoiceStatus('Interviewer speaking')
+        armInterviewerSpeakingWatchdog()
         break
       }
       case 'output_audio_buffer.stopped':
       case 'output_audio_buffer.cleared': {
-        speakingResponseActiveRef.current = false
-        lastActivityAtRef.current = Date.now()
-        window.setTimeout(() => {
-          if (!shouldKeepListeningRef.current) {
-            return
-          }
-          setLocalMicEnabled(true)
-          setVoiceStatus('Listening')
-        }, INTERVIEWER_AUDIO_RESUME_DELAY_MS)
+        restoreAfterInterviewerSpeech()
         break
       }
       case 'error': {
@@ -480,7 +658,7 @@ export default function CodingInterviewStage({
     }
   }
 
-  const startListeningSession = async () => {
+  const startListeningSession = async (startMicEnabled: boolean) => {
     if (!window.isSecureContext) {
       setError('Voice mode needs a secure page. Open the app on localhost or HTTPS.')
       return
@@ -492,8 +670,7 @@ export default function CodingInterviewStage({
     }
 
     setError(null)
-    setIsListening(true)
-    setVoiceStatus('Connecting voice session')
+    updateVoiceStatus('Connecting voice session')
 
     let localStream: MediaStream | null = null
     let peerConnection: RTCPeerConnection | null = null
@@ -518,11 +695,12 @@ export default function CodingInterviewStage({
         }
         remoteAudioRef.current.srcObject = event.streams[0]
         void remoteAudioRef.current.play().catch(() => {
-          setVoiceStatus('Click Start mic again if browser blocked speaker playback')
+          updateVoiceStatus('Click Start mic again if browser blocked speaker playback')
         })
       }
 
       peerConnection.onconnectionstatechange = () => {
+        logRealtimeDebugEvent('rtc.connection_state', peerConnection?.connectionState ?? 'unknown')
         if (peerConnection?.connectionState === 'failed' || peerConnection?.connectionState === 'disconnected') {
           shouldKeepListeningRef.current = false
           closeRealtimeResources('Voice session disconnected')
@@ -531,12 +709,17 @@ export default function CodingInterviewStage({
       }
 
       dataChannel.onopen = () => {
-        setIsListening(true)
-        setVoiceStatus('Listening')
+        logRealtimeDebugEvent('rtc.data_channel_open', startMicEnabled ? 'mic_on' : 'mic_off')
+        shouldKeepListeningRef.current = true
+        micStreamingRef.current = startMicEnabled
+        setLocalMicEnabled(startMicEnabled)
+        updateListeningState(startMicEnabled)
+        updateVoiceStatus(startMicEnabled ? 'Listening' : 'Voice ready')
         setError(null)
         sendRealtimeSessionUpdate(dataChannel as RTCDataChannel)
       }
       dataChannel.onclose = () => {
+        logRealtimeDebugEvent('rtc.data_channel_close')
         if (!shouldKeepListeningRef.current) {
           closeRealtimeResources('Microphone stopped')
           return
@@ -546,6 +729,7 @@ export default function CodingInterviewStage({
         setError('Realtime voice session ended. Start the mic again.')
       }
       dataChannel.onerror = () => {
+        logRealtimeDebugEvent('rtc.data_channel_error')
         shouldKeepListeningRef.current = false
         closeRealtimeResources('Voice session error')
         setError('Realtime voice channel failed.')
@@ -562,14 +746,18 @@ export default function CodingInterviewStage({
       localStream.getTracks().forEach((track) => peerConnection?.addTrack(track, localStream as MediaStream))
       localStreamRef.current = localStream
       localTrackRef.current = localStream.getAudioTracks()[0] ?? null
+      setLocalMicEnabled(startMicEnabled)
+      logRealtimeDebugEvent('rtc.local_stream_ready')
 
       const offer = await peerConnection.createOffer()
       await peerConnection.setLocalDescription(offer)
       await waitForIceGatheringComplete(peerConnection)
+      logRealtimeDebugEvent('rtc.ice_complete')
 
       const answer = await createCodingRealtimeSession(session.id, {
         sdp: peerConnection.localDescription?.sdp ?? offer.sdp ?? '',
       })
+      logRealtimeDebugEvent('rtc.session_created', answer.voice)
       realtimeVoiceRef.current = answer.voice
       realtimeTranscriptionModelRef.current = answer.transcription_model
       await peerConnection.setRemoteDescription({
@@ -584,6 +772,7 @@ export default function CodingInterviewStage({
       }
       lastActivityAtRef.current = Date.now()
     } catch (err) {
+      logRealtimeDebugEvent('rtc.start_failed', err instanceof Error ? err.message : 'unknown error')
       shouldKeepListeningRef.current = false
       localStream?.getTracks().forEach((track) => track.stop())
       dataChannel?.close()
@@ -594,13 +783,20 @@ export default function CodingInterviewStage({
   }
 
   const toggleListening = async () => {
-    if (hasRealtimeConnection() || isListening) {
-      stopListeningSession('Microphone stopped')
+    if (hasRealtimeConnection()) {
+      const nextMicEnabled = !micStreamingRef.current
+      shouldKeepListeningRef.current = true
+      micStreamingRef.current = nextMicEnabled
+      logRealtimeDebugEvent('ui.toggle_mic', nextMicEnabled ? 'on' : 'off')
+      setLocalMicEnabled(nextMicEnabled)
+      updateListeningState(nextMicEnabled)
+      updateVoiceStatus(nextMicEnabled ? 'Listening' : 'Voice ready')
       return
     }
 
     shouldKeepListeningRef.current = true
-    await startListeningSession()
+    logRealtimeDebugEvent('ui.toggle_mic', 'start_session_with_mic_on')
+    await startListeningSession(true)
   }
 
   const submitSpeech = async (eventType?: CodingInterviewEvent['type']) => {
@@ -613,6 +809,7 @@ export default function CodingInterviewStage({
       eventType ?? (looksLikeClarification(trimmed) ? 'clarification_asked' : 'candidate_spoke')
 
     lastActivityAtRef.current = Date.now()
+    clearReadingPromptTimer()
     if (session.coding_round) {
       onSessionChange({
         ...session,
@@ -629,7 +826,7 @@ export default function CodingInterviewStage({
     await sendEvent(
       buildEvent(resolvedEventType, {
         transcript_excerpt: trimmed,
-        code_excerpt: code.slice(-600),
+        code_excerpt: localCodeRef.current.slice(-600),
       }),
       trimmed,
     )
@@ -642,26 +839,96 @@ export default function CodingInterviewStage({
   }, [isVoiceEnabled, isListening])
 
   useEffect(() => {
+    if (!codingRound?.problem || !isVoiceEnabled) {
+      return
+    }
+
+    if (hasRealtimeConnection()) {
+      return
+    }
+
+    if (autoVoiceStartedRef.current === codingRound.problem.id) {
+      return
+    }
+
+    autoVoiceStartedRef.current = codingRound.problem.id
+    shouldKeepListeningRef.current = true
+    void startListeningSession(false)
+  }, [codingRound?.problem?.id, isVoiceEnabled])
+
+  useEffect(() => {
+    if (!codingRound?.problem || !isVoiceEnabled) {
+      return
+    }
+
+    if (!hasRealtimeConnection()) {
+      return
+    }
+
+    if (problemReadAloudRef.current === codingRound.problem.id) {
+      return
+    }
+
+    if (voiceStatus !== 'Voice ready') {
+      return
+    }
+
+    problemReadAloudRef.current = codingRound.problem.id
+    const readAloudText = buildProblemReadAloudText(session)
+    if (!readAloudText.trim()) {
+      return
+    }
+    speakInterviewerReply(readAloudText)
+  }, [codingRound?.problem?.id, isVoiceEnabled, session, voiceStatus])
+
+  useEffect(() => {
     const latestReply = [...(codingRound?.conversation ?? [])]
+      .map((turn, index) => ({ turn, index }))
       .reverse()
-      .find((turn) => turn.role === 'interviewer')
+      .find((entry) => entry.turn.role === 'interviewer')
 
     if (!latestReply) {
       return
     }
 
-    if (latestReply.content === latestQuestionRef.current) {
+    const latestReplyKey = `${latestReply.turn.created_at}-${latestReply.index}-${latestReply.turn.kind}`
+
+    if (latestReplyKey === latestSpokenTurnRef.current) {
       return
     }
 
     if (!isVoiceEnabled) {
-      latestQuestionRef.current = latestReply.content
+      latestSpokenTurnRef.current = latestReplyKey
       return
     }
 
-    latestQuestionRef.current = latestReply.content
-    speakInterviewerReply(latestReply.content)
+    latestSpokenTurnRef.current = latestReplyKey
+    speakInterviewerReply(latestReply.turn.content)
   }, [codingRound?.conversation, isListening, isVoiceEnabled])
+
+  useEffect(() => {
+    clearReadingPromptTimer()
+
+    if (!codingRound?.problem || codingRound.current_mode !== 'reading') {
+      return
+    }
+
+    readingPromptTimerRef.current = window.setTimeout(() => {
+      readingPromptTimerRef.current = null
+      void (async () => {
+        try {
+          const updated = await resumeCodingStage(session.id)
+          onSessionChange(updated)
+        } catch (err) {
+          setError(err instanceof Error ? err.message : 'Unable to continue the coding round')
+        }
+      })()
+    }, READING_GRACE_PERIOD_MS)
+
+    return () => {
+      clearReadingPromptTimer()
+    }
+  }, [codingRound?.problem?.id, codingRound?.current_mode, onSessionChange, session.id])
 
   useEffect(() => {
     if (!assistantThreadRef.current) {
@@ -677,6 +944,8 @@ export default function CodingInterviewStage({
   useEffect(() => {
     return () => {
       shouldKeepListeningRef.current = false
+      clearReadingPromptTimer()
+      clearInterviewerSpeakingWatchdog()
       if (pendingSpeechTimeoutRef.current !== null) {
         window.clearTimeout(pendingSpeechTimeoutRef.current)
       }
@@ -695,10 +964,11 @@ export default function CodingInterviewStage({
 
     const timeout = window.setTimeout(() => {
       lastActivityAtRef.current = Date.now()
+      clearReadingPromptTimer()
       lastCodeSentRef.current = code
       void sendEvent(
         buildEvent('code_changed', {
-          code_excerpt: code.slice(-600),
+          code_excerpt: localCodeRef.current.slice(-600),
           metadata: { code_length: code.length },
         }),
       )
@@ -871,6 +1141,7 @@ export default function CodingInterviewStage({
             language={language}
             value={code}
             onChange={(nextValue) => {
+              localCodeRef.current = nextValue
               setCode(nextValue)
               lastActivityAtRef.current = Date.now()
             }}

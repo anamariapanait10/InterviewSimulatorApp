@@ -1560,6 +1560,16 @@ async def _parse_document_with_markitdown(file: fastapi.UploadFile) -> ParsedDoc
     if len(content) > 10 * 1024 * 1024:
         raise fastapi.HTTPException(status_code=413, detail="File size exceeds 10 MB limit")
 
+    if suffix in {".txt", ".md"}:
+        for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+            try:
+                extracted = content.decode(encoding).strip()
+                if extracted:
+                    return ParsedDocumentResponse(file_name=file.filename, extracted_text=extracted)
+            except UnicodeDecodeError:
+                continue
+        raise fastapi.HTTPException(status_code=422, detail="Unable to decode the text document")
+
     tmp_path = ""
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
@@ -2145,6 +2155,33 @@ async def decide_coding_intervention(
         reply=result.get("interviewer_output"),
         coding_round=updated_session.coding_round,
     )
+
+
+@app.post("/api/interviews/{session_id}/coding/resume", response_model=InterviewSessionModel)
+async def resume_coding_stage(
+    session_id: UUID,
+    current_user: UserModel = fastapi.Depends(_get_current_user),
+):
+    session = await repo.get_interview_session(session_id, current_user.id)
+    if session is None:
+        raise fastapi.HTTPException(status_code=404, detail="Interview not found")
+    if session.current_stage != "coding" or session.coding_round is None:
+        raise fastapi.HTTPException(status_code=400, detail="Coding round is not enabled for this interview")
+
+    result = await _post_orchestrator_action(
+        action="resume_stage",
+        session_id=session_id,
+        coding_payload={
+            "problem_id": session.coding_round.problem.id if session.coding_round.problem else None,
+            "code": session.coding_round.current_code,
+            "language": session.coding_round.language,
+            "transcript_recent": "",
+        },
+        ui_context={"current_surface": "coding_stage", "voice_enabled": True, "editor_enabled": True},
+    )
+    if not isinstance(result.get("session"), dict):
+        raise fastapi.HTTPException(status_code=502, detail="Orchestrator did not return a valid coding session")
+    return await _refresh_user_session(session_id, current_user.id)
 
 
 @app.post("/api/interviews/{session_id}/finish", response_model=InterviewSessionModel)

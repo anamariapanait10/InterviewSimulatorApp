@@ -238,6 +238,9 @@ def _coding_mode_for_request(context: OrchestrationContext) -> str:
     if not coding_round.get("problem"):
         return "select_problem"
 
+    if context.action == "resume_stage" and _coding_stage_mode(context.session) == "reading":
+        return "followup"
+
     recent_events = context.coding_payload.get("recent_client_events") or []
     if any(event.get("type") == "clarification_asked" for event in recent_events):
         return "clarify"
@@ -257,6 +260,259 @@ def _coding_mode_for_request(context: OrchestrationContext) -> str:
     if code:
         return "followup"
     return "intervene"
+
+
+def _coding_stage_mode(session: dict[str, Any]) -> str:
+    coding_round = session.get("coding_round") or {}
+    return str(coding_round.get("current_mode") or "reading")
+
+
+def _coding_followup_count(session: dict[str, Any]) -> int:
+    coding_round = session.get("coding_round") or {}
+    conversation = coding_round.get("conversation") or []
+    return sum(
+        1
+        for turn in conversation
+        if str(turn.get("role") or "") == "interviewer"
+        and str(turn.get("source_event_type") or "") == "followup"
+    )
+
+
+def _coding_last_interviewer_source_event_type(session: dict[str, Any]) -> str:
+    coding_round = session.get("coding_round") or {}
+    conversation = coding_round.get("conversation") or []
+    for turn in reversed(conversation):
+        if str(turn.get("role") or "") == "interviewer":
+            return str(turn.get("source_event_type") or "").strip()
+    return ""
+
+
+def _coding_last_interviewer_content(session: dict[str, Any]) -> str:
+    coding_round = session.get("coding_round") or {}
+    conversation = coding_round.get("conversation") or []
+    for turn in reversed(conversation):
+        if str(turn.get("role") or "") == "interviewer":
+            return _strip(str(turn.get("content") or ""))
+    return ""
+
+
+def _coding_round_flag(session: dict[str, Any], name: str) -> bool:
+    coding_round = session.get("coding_round") or {}
+    return bool(coding_round.get(name))
+
+
+def _coding_implementation_prompt_count(session: dict[str, Any]) -> int:
+    coding_round = session.get("coding_round") or {}
+    conversation = coding_round.get("conversation") or []
+    count = 0
+    after_transition = False
+    for turn in conversation:
+        if str(turn.get("role") or "") != "interviewer":
+            continue
+        source_event_type = str(turn.get("source_event_type") or "").strip()
+        if source_event_type == "implementation_transition":
+            after_transition = True
+            continue
+        if after_transition and source_event_type in {"followup", "intervene"}:
+            count += 1
+    return count
+
+
+def _coding_recent_event_types(context: OrchestrationContext) -> list[str]:
+    return [
+        str(event.get("type") or "").strip()
+        for event in (context.coding_payload.get("recent_client_events") or [])
+        if str(event.get("type") or "").strip()
+    ]
+
+
+def _coding_transcript_text(context: OrchestrationContext) -> str:
+    return _strip(context.user_input or str(context.coding_payload.get("transcript_recent") or ""))
+
+
+def _coding_has_clarification_signal(context: OrchestrationContext) -> bool:
+    transcript = _coding_transcript_text(context).lower()
+    event_types = _coding_recent_event_types(context)
+    if "clarification_asked" in event_types:
+        return True
+    return any(token in transcript for token in ("clarify", "constraint", "problem statement", "explain the problem", "help me understand"))
+
+
+def _coding_has_intervention_signal(context: OrchestrationContext) -> bool:
+    transcript = _coding_transcript_text(context).lower()
+    event_types = _coding_recent_event_types(context)
+    if "candidate_pause" in event_types:
+        return True
+    return any(token in transcript for token in ("time complexity", "space complexity", "edge case", "stuck", "blocked"))
+
+
+def _coding_has_user_question_signal(context: OrchestrationContext) -> bool:
+    transcript = _coding_transcript_text(context).lower()
+    if not transcript:
+        return False
+    if "?" in transcript:
+        return True
+    return any(
+        transcript.startswith(prefix)
+        for prefix in (
+            "is ",
+            "are ",
+            "can ",
+            "could ",
+            "should ",
+            "would ",
+            "do ",
+            "does ",
+            "did ",
+            "what ",
+            "why ",
+            "how ",
+            "where ",
+            "when ",
+        )
+    )
+
+
+def _coding_has_completion_signal(context: OrchestrationContext) -> bool:
+    transcript = _coding_transcript_text(context).lower()
+    if not transcript:
+        return False
+    return any(
+        phrase in transcript
+        for phrase in (
+            "i finished",
+            "i'm finished",
+            "i am finished",
+            "i'm done",
+            "i am done",
+            "done implementing",
+            "finished implementing",
+            "already finished",
+            "solution is complete",
+            "implemented the solution",
+            "that's my solution",
+            "that is my solution",
+        )
+    )
+
+
+def _coding_has_substantive_answer(context: OrchestrationContext) -> bool:
+    transcript = _coding_transcript_text(context)
+    return len(transcript) >= 40
+
+
+def _coding_should_request_specialist(context: OrchestrationContext) -> bool:
+    mode = _coding_stage_mode(context.session)
+    event_types = _coding_recent_event_types(context)
+    transcript = _coding_transcript_text(context)
+    user_question = _coding_has_user_question_signal(context)
+    completion_signal = _coding_has_completion_signal(context)
+    wrap_up_asked = _coding_round_flag(context.session, "wrap_up_question_asked")
+    wrap_up_completed = _coding_round_flag(context.session, "wrap_up_completed")
+
+    if wrap_up_completed:
+        return _coding_has_clarification_signal(context) or user_question
+
+    if _coding_has_clarification_signal(context) or _coding_has_intervention_signal(context) or user_question:
+        return True
+
+    if context.action == "resume_stage":
+        return mode == "reading"
+
+    if context.action != "voice_turn":
+        return False
+
+    if mode == "reading":
+        return bool(transcript)
+
+    if mode == "discussion":
+        if "code_changed" in event_types and not transcript:
+            return False
+        if not transcript:
+            return False
+        return _coding_followup_count(context.session) < 2
+
+    if mode == "implementation":
+        if not transcript or "code_changed" in event_types:
+            return False
+        if completion_signal and not wrap_up_asked:
+            return True
+        if wrap_up_asked and wrap_up_completed:
+            return False
+        last_interviewer_event = _coding_last_interviewer_source_event_type(context.session)
+        if wrap_up_asked and last_interviewer_event == "followup":
+            return False
+        if last_interviewer_event in {"followup", "intervene"}:
+            return _coding_implementation_prompt_count(context.session) < 2
+        return False
+
+    return False
+
+
+def _coding_implementation_transition_reply() -> str:
+    return (
+        "Good. That is enough direction to start. Go ahead and implement it now, "
+        "and I will only step in if something important comes up."
+    )
+
+
+def _coding_wrap_up_completion_reply() -> str:
+    return "Thanks. I don't have any more coding questions. You can finish the interview whenever you're ready."
+
+
+def _coding_positive_completion_reply() -> str:
+    return (
+        "Thanks, that answers my question and the implementation direction sounds reasonable. "
+        "I don't have any more coding questions, so you can finish the interview whenever you're ready."
+    )
+
+
+def _should_skip_followup_for_implementation_transition(
+    session: dict[str, Any],
+    specialist_output: CodingOutput,
+) -> bool:
+    return _should_transition_to_implementation_after_followup(session, specialist_output)
+
+
+def _should_transition_to_implementation_after_followup(
+    session: dict[str, Any],
+    specialist_output: CodingOutput,
+) -> bool:
+    projected_followup_count = _coding_followup_count(session)
+    if specialist_output.coding_mode == "followup":
+        projected_followup_count += 1
+    return (
+        specialist_output.coding_mode == "followup"
+        and _coding_stage_mode(session) == "discussion"
+        and projected_followup_count >= 2
+        and not _coding_round_flag(session, "implementation_transition_sent")
+    )
+
+
+def _update_coding_round_mode(session: dict[str, Any], next_mode: str) -> dict[str, Any]:
+    coding_round = session.get("coding_round") or {}
+    if not coding_round or str(coding_round.get("current_mode") or "") == next_mode:
+        return session
+    updated_round = {**coding_round, "current_mode": next_mode}
+    return {**session, "coding_round": updated_round}
+
+
+def _update_coding_round_flags(session: dict[str, Any], **flags: bool) -> dict[str, Any]:
+    coding_round = session.get("coding_round") or {}
+    if not coding_round:
+        return session
+    updated_round = {**coding_round, **flags}
+    return {**session, "coding_round": updated_round}
+
+
+async def _store_update_coding_mode(session_id: str, session: dict[str, Any], next_mode: str) -> dict[str, Any]:
+    updated_session = _update_coding_round_mode(session, next_mode)
+    return await _store_save_coding_problem(session_id, updated_session["coding_round"])
+
+
+async def _store_update_coding_flags(session_id: str, session: dict[str, Any], **flags: bool) -> dict[str, Any]:
+    updated_session = _update_coding_round_flags(session, **flags)
+    return await _store_save_coding_problem(session_id, updated_session["coding_round"])
 
 
 def _build_orchestrator_prompt(context: OrchestrationContext) -> str:
@@ -546,8 +802,11 @@ Problem candidates for selection:
 
 Rules:
 - In select_problem mode, choose exactly one problem id from the provided candidates and explain why.
+- If the current coding stage mode is reading and there is no candidate transcript yet, ask one short question about the candidate's initial approach.
 - In clarify mode, answer only the prompt/constraints/examples question without giving the full solution.
-- In followup mode, respond briefly and naturally as the interviewer.
+- In followup mode, respond briefly and naturally as the interviewer. Do not keep drilling forever.
+- Ask at most one or two follow-up questions after the candidate explains an initial approach, then let them code.
+- In implementation mode, do not ask another generic follow-up unless there is a clear clarification or intervention signal.
 - In intervene mode, ask a short pointed question about the candidate's current gap.
 - Never invent a new problem outside the catalog.
 """.strip()
@@ -1035,10 +1294,13 @@ async def _resume_stage(session: dict[str, Any]) -> dict[str, Any]:
             "current_code": (selected_problem.get("starter_code") or {}).get(session.get("preferred_language") or "typescript", ""),
             "transcript": "",
             "interviewer_prompt": f"Conduct a concise {session.get('interviewer_mode') or 'neutral'} coding interview.",
-            "current_mode": "select_problem",
+            "current_mode": "reading",
             "event_log": [],
             "conversation": [],
             "interventions": [],
+            "implementation_transition_sent": False,
+            "wrap_up_question_asked": False,
+            "wrap_up_completed": False,
             "cooldown_seconds": 40,
             "last_intervention_at": None,
             "latest_reason": None,
@@ -1052,7 +1314,7 @@ async def _resume_stage(session: dict[str, Any]) -> dict[str, Any]:
             "role": "interviewer",
             "agent_name": latest_handoff["to_agent"],
             "kind": "coding_reply",
-            "content": specialist_output.reply or "Let's move into the coding round. Talk me through your approach as you work.",
+            "content": specialist_output.reply or "Take about ten seconds to read the prompt. Then tell me the approach you're leaning toward.",
             "metadata": {"coding_mode": "select_problem"},
         }
         session = await _store_append_turn(session_id, opening_turn)
@@ -1264,6 +1526,9 @@ async def handle_orchestrator_action(
         }
 
     if action in {"voice_turn", "resume_stage"} and _current_stage(session) == "coding":
+        transitioned_to_implementation = False
+        wrap_up_completion_ready = False
+        implementation_conclusion_ready = False
         if action == "voice_turn":
             recent_events = recent_client_events or []
             for event in recent_events:
@@ -1302,6 +1567,225 @@ async def handle_orchestrator_action(
                         "severity": None,
                     },
                 )
+                if _coding_stage_mode(session) == "reading":
+                    session = await _store_update_coding_mode(session_id, session, "discussion")
+                elif _coding_stage_mode(session) == "discussion" and _coding_followup_count(session) >= 2:
+                    session = await _store_update_coding_mode(session_id, session, "implementation")
+                    transitioned_to_implementation = not _coding_round_flag(session, "implementation_transition_sent")
+
+            if "code_changed" in [str(event.get("type") or "") for event in recent_events]:
+                if _coding_stage_mode(session) in {"reading", "discussion"}:
+                    session = await _store_update_coding_mode(session_id, session, "implementation")
+                    transitioned_to_implementation = not _coding_round_flag(session, "implementation_transition_sent")
+
+            context_for_completion = OrchestrationContext(
+                action=action,
+                session=session,
+                user_input=user_input,
+                coding_payload=coding_payload,
+                ui_context=ui_context or {},
+            )
+            if (
+                _coding_stage_mode(session) == "implementation"
+                and not _coding_round_flag(session, "wrap_up_question_asked")
+                and not _coding_round_flag(session, "wrap_up_completed")
+                and not _coding_has_user_question_signal(context_for_completion)
+                and not _coding_has_clarification_signal(context_for_completion)
+                and not _coding_has_intervention_signal(context_for_completion)
+                and _coding_last_interviewer_source_event_type(session) in {"followup", "intervene"}
+                and _coding_has_substantive_answer(context_for_completion)
+                and _coding_implementation_prompt_count(session) >= 1
+            ):
+                implementation_conclusion_ready = True
+            if (
+                _coding_stage_mode(session) == "implementation"
+                and _coding_round_flag(session, "wrap_up_question_asked")
+                and not _coding_round_flag(session, "wrap_up_completed")
+                and not _coding_has_user_question_signal(context_for_completion)
+                and _coding_last_interviewer_source_event_type(session) == "followup"
+                and _coding_transcript_text(context_for_completion)
+            ):
+                wrap_up_completion_ready = True
+
+        if transitioned_to_implementation and not _coding_round_flag(session, "implementation_transition_sent"):
+            transition_reply = _coding_implementation_transition_reply()
+            session = await _store_update_coding_flags(
+                session_id,
+                session,
+                implementation_transition_sent=True,
+            )
+            session = await _store_append_turn(
+                session_id,
+                {
+                    "stage": "coding",
+                    "role": "interviewer",
+                    "agent_name": "interview_orchestrator_agent",
+                    "kind": "coding_reply",
+                    "content": transition_reply,
+                    "metadata": {"coding_mode": "implementation_transition"},
+                },
+            )
+            session = await _store_append_coding_message(
+                session_id,
+                {
+                    "role": "interviewer",
+                    "content": transition_reply,
+                    "kind": "reply",
+                    "source_event_type": "implementation_transition",
+                    "severity": None,
+                },
+            )
+            await _store_append_decision_trace(
+                session_id,
+                {
+                    "active_agent": "interview_orchestrator_agent",
+                    "decision_type": "implementation_transition",
+                    "summary": "Moved the candidate from discussion into implementation.",
+                    "stage": "coding",
+                },
+            )
+            session = await _store_get_session(session_id)
+            return {
+                "stage": session.get("current_stage"),
+                "active_agent": session.get("active_agent"),
+                "handoff": session.get("handoff_history", [])[-1] if session.get("handoff_history") else None,
+                "interviewer_output": transition_reply,
+                "next_prompt": None,
+                "ui_patch": {"show_coding_round": True},
+                "decision_trace_entry": session.get("decision_trace", [])[-1] if session.get("decision_trace") else None,
+                "is_stage_complete": False,
+                "is_interview_complete": False,
+                "session": session,
+                "final_report": None,
+            }
+
+        if implementation_conclusion_ready:
+            completion_reply = _coding_positive_completion_reply()
+            session = await _store_update_coding_flags(
+                session_id,
+                session,
+                wrap_up_completed=True,
+            )
+            session = await _store_append_turn(
+                session_id,
+                {
+                    "stage": "coding",
+                    "role": "interviewer",
+                    "agent_name": "interview_orchestrator_agent",
+                    "kind": "coding_reply",
+                    "content": completion_reply,
+                    "metadata": {"coding_mode": "implementation_complete"},
+                },
+            )
+            session = await _store_append_coding_message(
+                session_id,
+                {
+                    "role": "interviewer",
+                    "content": completion_reply,
+                    "kind": "reply",
+                    "source_event_type": "implementation_complete",
+                    "severity": None,
+                },
+            )
+            await _store_append_decision_trace(
+                session_id,
+                {
+                    "active_agent": "interview_orchestrator_agent",
+                    "decision_type": "implementation_complete",
+                    "summary": "Accepted the candidate's answer and ended the coding discussion.",
+                    "stage": "coding",
+                },
+            )
+            session = await _store_get_session(session_id)
+            return {
+                "stage": session.get("current_stage"),
+                "active_agent": session.get("active_agent"),
+                "handoff": session.get("handoff_history", [])[-1] if session.get("handoff_history") else None,
+                "interviewer_output": completion_reply,
+                "next_prompt": None,
+                "ui_patch": {"show_coding_round": True},
+                "decision_trace_entry": session.get("decision_trace", [])[-1] if session.get("decision_trace") else None,
+                "is_stage_complete": False,
+                "is_interview_complete": False,
+                "session": session,
+                "final_report": None,
+            }
+
+        if wrap_up_completion_ready:
+            completion_reply = _coding_wrap_up_completion_reply()
+            session = await _store_update_coding_flags(
+                session_id,
+                session,
+                wrap_up_completed=True,
+            )
+            session = await _store_append_turn(
+                session_id,
+                {
+                    "stage": "coding",
+                    "role": "interviewer",
+                    "agent_name": "interview_orchestrator_agent",
+                    "kind": "coding_reply",
+                    "content": completion_reply,
+                    "metadata": {"coding_mode": "wrap_up_complete"},
+                },
+            )
+            session = await _store_append_coding_message(
+                session_id,
+                {
+                    "role": "interviewer",
+                    "content": completion_reply,
+                    "kind": "reply",
+                    "source_event_type": "wrap_up_complete",
+                    "severity": None,
+                },
+            )
+            await _store_append_decision_trace(
+                session_id,
+                {
+                    "active_agent": "interview_orchestrator_agent",
+                    "decision_type": "wrap_up_complete",
+                    "summary": "Finished the final coding wrap-up and invited the candidate to end the interview.",
+                    "stage": "coding",
+                },
+            )
+            session = await _store_get_session(session_id)
+            return {
+                "stage": session.get("current_stage"),
+                "active_agent": session.get("active_agent"),
+                "handoff": session.get("handoff_history", [])[-1] if session.get("handoff_history") else None,
+                "interviewer_output": completion_reply,
+                "next_prompt": None,
+                "ui_patch": {"show_coding_round": True},
+                "decision_trace_entry": session.get("decision_trace", [])[-1] if session.get("decision_trace") else None,
+                "is_stage_complete": False,
+                "is_interview_complete": False,
+                "session": session,
+                "final_report": None,
+            }
+
+        if not _coding_should_request_specialist(
+            OrchestrationContext(
+                action=action,
+                session=session,
+                user_input=user_input,
+                coding_payload=coding_payload,
+                ui_context=ui_context or {},
+            )
+        ):
+            session = await _store_get_session(session_id)
+            return {
+                "stage": session.get("current_stage"),
+                "active_agent": session.get("active_agent"),
+                "handoff": session.get("handoff_history", [])[-1] if session.get("handoff_history") else None,
+                "interviewer_output": None,
+                "next_prompt": None,
+                "ui_patch": {"show_coding_round": True},
+                "decision_trace_entry": session.get("decision_trace", [])[-1] if session.get("decision_trace") else None,
+                "is_stage_complete": False,
+                "is_interview_complete": False,
+                "session": session,
+                "final_report": None,
+            }
 
         context = OrchestrationContext(
             action=action,
@@ -1310,6 +1794,7 @@ async def handle_orchestrator_action(
             coding_payload=coding_payload,
             ui_context=ui_context or {},
         )
+        completion_signal = _coding_has_completion_signal(context)
         specialist_output = await _run_specialist(context)
         latest_handoff = context.handoff_log[-1]
         await _store_set_active_agent(session_id, latest_handoff["to_agent"])
@@ -1318,13 +1803,44 @@ async def handle_orchestrator_action(
             raise RuntimeError("Expected coding output during coding stage")
 
         message_kind = "intervention" if specialist_output.coding_mode == "intervene" else "coding_reply"
-        if specialist_output.reply.strip():
+        reply_text = specialist_output.reply.strip()
+        last_interviewer_content = _coding_last_interviewer_content(session)
+        skip_followup_for_transition = _should_skip_followup_for_implementation_transition(
+            session,
+            specialist_output,
+        )
+        surfaced_reply_text: str | None = None
+        if reply_text and reply_text == last_interviewer_content:
+            await _store_append_decision_trace(
+                session_id,
+                {
+                    "active_agent": latest_handoff["to_agent"],
+                    "decision_type": "duplicate_reply_suppressed",
+                    "summary": "Suppressed a repeated coding follow-up.",
+                    "stage": "coding",
+                },
+            )
+            session = await _store_get_session(session_id)
+            return {
+                "stage": session.get("current_stage"),
+                "active_agent": session.get("active_agent"),
+                "handoff": latest_handoff,
+                "interviewer_output": None,
+                "next_prompt": None,
+                "ui_patch": {"show_coding_round": True},
+                "decision_trace_entry": session.get("decision_trace", [])[-1] if session.get("decision_trace") else None,
+                "is_stage_complete": False,
+                "is_interview_complete": False,
+                "session": session,
+                "final_report": None,
+            }
+        if reply_text and not skip_followup_for_transition:
             interviewer_turn = {
                 "stage": "coding",
                 "role": "interviewer",
                 "agent_name": latest_handoff["to_agent"],
                 "kind": message_kind,
-                "content": specialist_output.reply.strip(),
+                "content": reply_text,
                 "metadata": {"coding_mode": specialist_output.coding_mode},
             }
             session = await _store_append_turn(session_id, interviewer_turn)
@@ -1332,11 +1848,60 @@ async def handle_orchestrator_action(
                 session_id,
                 {
                     "role": "interviewer",
-                    "content": specialist_output.reply.strip(),
+                    "content": reply_text,
                     "kind": "intervention" if specialist_output.coding_mode == "intervene" else "reply",
                     "source_event_type": specialist_output.coding_mode,
                     "severity": "medium" if specialist_output.coding_mode == "intervene" else None,
                 },
+            )
+            surfaced_reply_text = reply_text
+        elif skip_followup_for_transition:
+            await _store_append_decision_trace(
+                session_id,
+                {
+                    "active_agent": latest_handoff["to_agent"],
+                    "decision_type": "followup_suppressed_for_transition",
+                    "summary": "Skipped the final follow-up because the round is moving directly into implementation.",
+                    "stage": "coding",
+                },
+            )
+        if specialist_output.coding_mode == "followup" and _coding_stage_mode(session) == "reading":
+            session = await _store_update_coding_mode(session_id, session, "discussion")
+        elif _should_transition_to_implementation_after_followup(session, specialist_output):
+            session = await _store_update_coding_mode(session_id, session, "implementation")
+            session = await _store_update_coding_flags(
+                session_id,
+                session,
+                implementation_transition_sent=True,
+            )
+            transition_reply = _coding_implementation_transition_reply()
+            session = await _store_append_turn(
+                session_id,
+                {
+                    "stage": "coding",
+                    "role": "interviewer",
+                    "agent_name": "interview_orchestrator_agent",
+                    "kind": "coding_reply",
+                    "content": transition_reply,
+                    "metadata": {"coding_mode": "implementation_transition"},
+                },
+            )
+            session = await _store_append_coding_message(
+                session_id,
+                {
+                    "role": "interviewer",
+                    "content": transition_reply,
+                    "kind": "reply",
+                    "source_event_type": "implementation_transition",
+                    "severity": None,
+                },
+            )
+            surfaced_reply_text = transition_reply
+        elif completion_signal and specialist_output.coding_mode == "followup":
+            session = await _store_update_coding_flags(
+                session_id,
+                session,
+                wrap_up_question_asked=True,
             )
         await _store_append_decision_trace(
             session_id,
@@ -1352,7 +1917,7 @@ async def handle_orchestrator_action(
             "stage": session.get("current_stage"),
             "active_agent": session.get("active_agent"),
             "handoff": latest_handoff,
-            "interviewer_output": specialist_output.reply.strip(),
+            "interviewer_output": surfaced_reply_text,
             "next_prompt": None,
             "ui_patch": {"show_coding_round": True},
             "decision_trace_entry": session.get("decision_trace", [])[-1] if session.get("decision_trace") else None,

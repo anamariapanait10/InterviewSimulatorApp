@@ -185,6 +185,7 @@ export interface CodingInterviewRound {
   current_code: string
   transcript: string
   interviewer_prompt: string | null
+  current_mode?: 'reading' | 'discussion' | 'implementation' | 'select_problem' | null
   event_log: CodingInterviewEvent[]
   conversation: CodingConversationTurn[]
   interventions: CodingIntervention[]
