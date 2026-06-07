@@ -396,6 +396,28 @@ def _coding_has_completion_signal(context: OrchestrationContext) -> bool:
     )
 
 
+def _coding_has_code_update_signal(context: OrchestrationContext) -> bool:
+    transcript = _coding_transcript_text(context).lower()
+    if not transcript:
+        return False
+    return any(
+        phrase in transcript
+        for phrase in (
+            "i fixed it",
+            "i have fixed it",
+            "i fixed that",
+            "i updated it",
+            "i updated the code",
+            "i corrected it",
+            "i repaired it",
+            "i changed it",
+            "i have updated the code",
+            "i have corrected it",
+            "my mistake",
+        )
+    )
+
+
 def _coding_has_substantive_answer(context: OrchestrationContext) -> bool:
     transcript = _coding_transcript_text(context)
     return len(transcript) >= 40
@@ -456,6 +478,18 @@ def _coding_implementation_transition_reply() -> str:
     )
 
 
+def _coding_opening_reply(problem_title: str | None = None) -> str:
+    if problem_title:
+        return f"We'll use {problem_title}. Take about ten seconds to read the prompt, then walk me through your initial approach."
+    return "Take about ten seconds to read the prompt, then walk me through your initial approach."
+
+
+def _coding_initial_approach_question(problem_title: str | None = None) -> str:
+    if problem_title:
+        return f"What's your initial approach for {problem_title}? Focus on the main idea and the data structures you'd use."
+    return "What's your initial approach? Focus on the main idea and the data structures you'd use."
+
+
 def _coding_wrap_up_completion_reply() -> str:
     return "Thanks. I don't have any more coding questions. You can finish the interview whenever you're ready."
 
@@ -487,6 +521,14 @@ def _should_transition_to_implementation_after_followup(
         and projected_followup_count >= 2
         and not _coding_round_flag(session, "implementation_transition_sent")
     )
+
+
+def _normalize_coding_output_mode(session: dict[str, Any], specialist_output: CodingOutput) -> CodingOutput:
+    coding_round = session.get("coding_round") or {}
+    problem_selected = bool(coding_round.get("problem"))
+    if problem_selected and specialist_output.coding_mode == "select_problem":
+        return specialist_output.model_copy(update={"coding_mode": "followup"})
+    return specialist_output
 
 
 def _update_coding_round_mode(session: dict[str, Any], next_mode: str) -> dict[str, Any]:
@@ -802,11 +844,15 @@ Problem candidates for selection:
 
 Rules:
 - In select_problem mode, choose exactly one problem id from the provided candidates and explain why.
+- If a current problem is already selected, do not talk as if you are selecting a new problem again.
 - If the current coding stage mode is reading and there is no candidate transcript yet, ask one short question about the candidate's initial approach.
 - In clarify mode, answer only the prompt/constraints/examples question without giving the full solution.
 - In followup mode, respond briefly and naturally as the interviewer. Do not keep drilling forever.
 - Ask at most one or two follow-up questions after the candidate explains an initial approach, then let them code.
 - In implementation mode, do not ask another generic follow-up unless there is a clear clarification or intervention signal.
+- Treat the current code excerpt as the source of truth for the implementation. If it is already present, do not ask the candidate to paste or share the code again.
+- If the candidate says the implementation is ready or asks you to verify it, inspect the current code directly and respond with a concrete code review observation or a brief confirmation.
+- If the candidate says they fixed or updated something after your code review question, re-check the current code before deciding to finish the coding round.
 - In intervene mode, ask a short pointed question about the candidate's current gap.
 - Never invent a new problem outside the catalog.
 """.strip()
@@ -1314,7 +1360,7 @@ async def _resume_stage(session: dict[str, Any]) -> dict[str, Any]:
             "role": "interviewer",
             "agent_name": latest_handoff["to_agent"],
             "kind": "coding_reply",
-            "content": specialist_output.reply or "Take about ten seconds to read the prompt. Then tell me the approach you're leaning toward.",
+            "content": _coding_opening_reply(selected_problem.get("title")),
             "metadata": {"coding_mode": "select_problem"},
         }
         session = await _store_append_turn(session_id, opening_turn)
@@ -1526,6 +1572,59 @@ async def handle_orchestrator_action(
         }
 
     if action in {"voice_turn", "resume_stage"} and _current_stage(session) == "coding":
+        if (
+            action == "resume_stage"
+            and _coding_stage_mode(session) == "reading"
+            and not any(
+                str(turn.get("role") or "") == "candidate"
+                for turn in ((session.get("coding_round") or {}).get("conversation") or [])
+            )
+        ):
+            problem_title = ((session.get("coding_round") or {}).get("problem") or {}).get("title")
+            initial_question = _coding_initial_approach_question(problem_title)
+            turn = {
+                "stage": "coding",
+                "role": "interviewer",
+                "agent_name": "interview_orchestrator_agent",
+                "kind": "coding_reply",
+                "content": initial_question,
+                "metadata": {"coding_mode": "followup"},
+            }
+            session = await _store_append_turn(session_id, turn)
+            session = await _store_append_coding_message(
+                session_id,
+                {
+                    "role": "interviewer",
+                    "content": initial_question,
+                    "kind": "reply",
+                    "source_event_type": "followup",
+                    "severity": None,
+                },
+            )
+            await _store_append_decision_trace(
+                session_id,
+                {
+                    "active_agent": "interview_orchestrator_agent",
+                    "decision_type": "initial_coding_prompt",
+                    "summary": "Asked the candidate for their high-level approach before any detailed follow-up.",
+                    "stage": "coding",
+                },
+            )
+            session = await _store_get_session(session_id)
+            return {
+                "stage": session.get("current_stage"),
+                "active_agent": session.get("active_agent"),
+                "handoff": session.get("handoff_history", [])[-1] if session.get("handoff_history") else None,
+                "interviewer_output": initial_question,
+                "next_prompt": None,
+                "ui_patch": {"show_coding_round": True},
+                "decision_trace_entry": session.get("decision_trace", [])[-1] if session.get("decision_trace") else None,
+                "is_stage_complete": False,
+                "is_interview_complete": False,
+                "session": session,
+                "final_report": None,
+            }
+
         transitioned_to_implementation = False
         wrap_up_completion_ready = False
         implementation_conclusion_ready = False
@@ -1592,6 +1691,7 @@ async def handle_orchestrator_action(
                 and not _coding_has_user_question_signal(context_for_completion)
                 and not _coding_has_clarification_signal(context_for_completion)
                 and not _coding_has_intervention_signal(context_for_completion)
+                and not _coding_has_code_update_signal(context_for_completion)
                 and _coding_last_interviewer_source_event_type(session) in {"followup", "intervene"}
                 and _coding_has_substantive_answer(context_for_completion)
                 and _coding_implementation_prompt_count(session) >= 1
@@ -1796,6 +1896,7 @@ async def handle_orchestrator_action(
         )
         completion_signal = _coding_has_completion_signal(context)
         specialist_output = await _run_specialist(context)
+        specialist_output = _normalize_coding_output_mode(session, specialist_output)
         latest_handoff = context.handoff_log[-1]
         await _store_set_active_agent(session_id, latest_handoff["to_agent"])
         await _store_record_handoff(session_id, latest_handoff)
