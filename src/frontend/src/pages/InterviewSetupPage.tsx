@@ -92,7 +92,13 @@ function SourceCard(props: {
       <div className="section-head">
         <div>
           <p className="section-eyebrow">{label}</p>
-          <h2>{value.mode === 'text' ? 'Paste content directly' : 'Upload a document'}</h2>
+          <h2>
+            {value.mode === 'text'
+              ? 'Paste content directly'
+              : value.mode === 'link'
+                ? 'Import from a live link'
+                : 'Upload a document'}
+          </h2>
         </div>
         <div className="mode-toggle" role="tablist" aria-label={`${label} input mode`}>
           <button
@@ -136,7 +142,7 @@ function SourceCard(props: {
           />
         </>
       ) : value.mode === 'file' ? (
-        <div className="upload-panel">
+        <div className="upload-panel upload-panel-file">
           <label className="file-input">
             <input type="file" accept=".pdf,.doc,.docx,.txt,.md,.html" onChange={onFileChange} />
             <span>{value.isParsing ? 'Parsing document...' : 'Choose PDF or DOCX'}</span>
@@ -394,13 +400,6 @@ export default function InterviewSetupPage() {
 
   return (
     <section className="setup-layout">
-      <article className="flow-card intro-card">
-        <p className="section-eyebrow">Interview Setup</p>
-        <h1>Configure the interview parameters.</h1>
-        <p className="support-copy mt-2">
-          Load the candidate context, choose the interview format, and include the live coding round.
-        </p>
-      </article>
 
       <div className="setup-grid">
         <SourceCard
@@ -453,7 +452,7 @@ export default function InterviewSetupPage() {
               className={interviewLength === option.value ? 'length-option active' : 'length-option'}
               onClick={() => setInterviewLength(option.value)}
             >
-              <strong style={{ color: "white" }}>{option.title}</strong>
+              <strong>{option.title}</strong>
               <span>{option.description}</span>
             </button>
           ))}
@@ -476,7 +475,7 @@ export default function InterviewSetupPage() {
               <span className="voice-toggle-thumb" />
             </span>
             <span className="voice-toggle-copy">
-              <strong style={{ color: 'white' }}>{voiceEnabled ? 'Voice on' : 'Voice off'}</strong>
+              <strong>{voiceEnabled ? 'Voice on' : 'Voice off'}</strong>
               <span>
                 {voiceEnabled
                   ? 'The interviewer can speak and microphone controls stay available during the interview.'
@@ -572,7 +571,7 @@ export default function InterviewSetupPage() {
               className={codingDifficulty === option ? 'length-option active' : 'length-option'}
               onClick={() => setCodingDifficulty(option)}
             >
-              <strong style={{ color: 'white' }}>{option}</strong>
+              <strong>{option}</strong>
               <span>
                 {option === 'hard'
                   ? 'Plain editor, no syntax highlighting'
@@ -596,7 +595,7 @@ export default function InterviewSetupPage() {
               className={interviewerMode === option ? 'length-option active' : 'length-option'}
               onClick={() => setInterviewerMode(option)}
             >
-              <strong style={{ color: 'white' }}>{option.replace('_', ' ')}</strong>
+              <strong>{option.replace('_', ' ')}</strong>
               <span>
                 {option === 'warm' && 'Short prompts, a little more supportive'}
                 {option === 'neutral' && 'Balanced FAANG-style interviewer'}

@@ -27,6 +27,28 @@ function formatScore(total: number | null | undefined, suffix = '/100'): string 
   return `${total}${suffix}`
 }
 
+function formatLengthLabel(length: string | null | undefined): string {
+  if (!length) {
+    return 'Custom'
+  }
+
+  return length.charAt(0).toUpperCase() + length.slice(1)
+}
+
+function formatCompletedAt(value: string | null | undefined): string {
+  if (!value) {
+    return 'In progress'
+  }
+
+  return new Date(value).toLocaleString([], {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
 export default function InterviewSummaryPanel({ session }: InterviewSummaryPanelProps) {
   if (!session.report) {
     return (
@@ -61,7 +83,7 @@ export default function InterviewSummaryPanel({ session }: InterviewSummaryPanel
         <div className="meta-grid compact">
           <div>
             <span>Length</span>
-            <strong>{session.interview_length ?? 'custom'}</strong>
+            <strong>{formatLengthLabel(session.interview_length)}</strong>
           </div>
           <div>
             <span>Company</span>
@@ -73,7 +95,7 @@ export default function InterviewSummaryPanel({ session }: InterviewSummaryPanel
           </div>
           <div>
             <span>Completed</span>
-            <strong>{session.completed_at ? new Date(session.completed_at).toLocaleString() : 'In progress'}</strong>
+            <strong>{formatCompletedAt(session.completed_at)}</strong>
           </div>
         </div>
       </article>

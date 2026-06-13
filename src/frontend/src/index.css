@@ -2,20 +2,30 @@
 
 :root {
   --paper: #ffffff;
-  --paper-strong: #f8fafc;
-  --sand: #273449;
-  --surface: rgba(39, 52, 73, 0.82);
-  --surface-light: rgba(60, 77, 103, 0.58);
-  --surface-strong: #1e293b;
-  --line-soft: rgba(148, 163, 184, 0.26);
-  --line-strong: rgba(148, 163, 184, 0.4);
-  --ink-strong: #f1f5f9;
-  --ink-soft: #cbd5e1;
-  --accent-coral: #7c3aed;
-  --accent-coral-dark: #6d28d9;
-  --accent-teal: #a78bfa;
-  --accent-gold: #ec4899;
-  --surface-shadow: 0 24px 60px rgba(0, 0, 0, 0.22);
+  --paper-strong: #fbfafd;
+  --paper-muted: #f4f1f8;
+  --surface: rgba(255, 255, 255, 0.9);
+  --surface-light: #f7f4fb;
+  --surface-strong: #ece6f4;
+  --surface-tint: rgba(125, 104, 163, 0.1);
+  --surface-tint-strong: rgba(125, 104, 163, 0.16);
+  --surface-muted: rgba(31, 24, 43, 0.04);
+  --shell-ink: #f8f7fb;
+  --line-soft: rgba(28, 23, 38, 0.08);
+  --line-strong: rgba(28, 23, 38, 0.14);
+  --ink-strong: #18141f;
+  --ink-soft: #6f687f;
+  --ink-muted: #9a91ab;
+  --accent-coral: #7d68a3;
+  --accent-coral-dark: #665388;
+  --accent-teal: #a894cb;
+  --accent-gold: #c3b2db;
+  --accent-warm: #d9b894;
+  --danger-soft: #f6d8dc;
+  --danger-strong: #9a4957;
+  --info-soft: #dfe4fb;
+  --info-strong: #5d6897;
+  --surface-shadow: 0 24px 60px rgba(16, 12, 24, 0.08);
   --font-display: 'Fraunces', serif;
   --font-body: 'Space Grotesk', sans-serif;
 
@@ -42,9 +52,9 @@ body,
 body {
   min-height: 100vh;
   background:
-    radial-gradient(circle at top left, rgba(124, 58, 237, 0.2), transparent 28%),
-    radial-gradient(circle at 90% 15%, rgba(236, 72, 153, 0.16), transparent 24%),
-    linear-gradient(180deg, #1b2438 0%, #26334b 48%, #22304a 100%);
+    radial-gradient(circle at top left, rgba(125, 104, 163, 0.12), transparent 26%),
+    radial-gradient(circle at 85% 10%, rgba(195, 178, 219, 0.22), transparent 24%),
+    linear-gradient(180deg, #ece8f1 0%, #f5f3f7 46%, #ebe7ef 100%);
   color: var(--ink-strong);
   font-family: var(--font-body);
 }
@@ -72,6 +82,7 @@ h3 {
   font-family: var(--font-display);
   line-height: 1.05;
   letter-spacing: -0.03em;
+  color: var(--ink-strong);
 }
 
 p {
@@ -89,7 +100,7 @@ input:focus,
 select:focus,
 button:focus-visible,
 a:focus-visible {
-  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.22);
+  box-shadow: 0 0 0 3px rgba(125, 104, 163, 0.18);
 }
 
 @media (prefers-reduced-motion: reduce) {

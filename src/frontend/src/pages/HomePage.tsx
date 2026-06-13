@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { NavLink } from 'react-router-dom'
 import { listInterviewHistory } from '../api'
 import { useAuth } from '../auth'
 import type { InterviewHistoryItem } from '../types'
@@ -12,7 +11,7 @@ interface HeatmapCell {
 }
 
 const HEATMAP_DAYS = 112
-const HEATMAP_WEEKDAY_LABELS = ['Mon', 'Wed', 'Fri']
+const HEATMAP_WEEKDAY_LABELS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
 const LENGTH_LABELS = {
   short: 'Short',
   medium: 'Medium',
@@ -20,7 +19,15 @@ const LENGTH_LABELS = {
 } as const
 
 function formatDateKey(date: Date): string {
-  return date.toISOString().slice(0, 10)
+  const year = date.getFullYear()
+  const month = `${date.getMonth() + 1}`.padStart(2, '0')
+  const day = `${date.getDate()}`.padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function parseDateKey(value: string): Date {
+  const [year, month, day] = value.split('-').map(Number)
+  return new Date(year, month - 1, day)
 }
 
 function formatShortDate(value: string): string {
@@ -162,7 +169,7 @@ function buildHeatmap(history: InterviewHistoryItem[]): HeatmapCell[][] {
     })
   }
 
-  const firstWeekday = (new Date(cells[0].dateKey).getDay() + 6) % 7
+  const firstWeekday = (parseDateKey(cells[0].dateKey).getDay() + 6) % 7
   const padded: HeatmapCell[] = [
     ...Array.from({ length: firstWeekday }, (_, index) => ({
       dateKey: `pad-start-${index}`,
@@ -234,8 +241,8 @@ function ScoreTrendChart({ sessions }: { sessions: InterviewHistoryItem[] }) {
       <svg viewBox={`0 0 ${width} ${height}`} className="trend-chart" role="img" aria-label="Score evolution chart">
         <defs>
           <linearGradient id="scoreTrendStroke" x1="0%" x2="100%" y1="0%" y2="0%">
-            <stop offset="0%" stopColor="#fb7185" />
-            <stop offset="100%" stopColor="#f59e0b" />
+            <stop offset="0%" stopColor="var(--accent-coral)" />
+            <stop offset="100%" stopColor="var(--accent-warm)" />
           </linearGradient>
         </defs>
 
@@ -293,9 +300,9 @@ function ActivityHeatmap({ history }: { history: InterviewHistoryItem[] }) {
   return (
     <div className="activity-grid-shell">
       <div className="activity-weekday-labels" aria-hidden="true">
-        <span>{HEATMAP_WEEKDAY_LABELS[0]}</span>
-        <span>{HEATMAP_WEEKDAY_LABELS[1]}</span>
-        <span>{HEATMAP_WEEKDAY_LABELS[2]}</span>
+        {HEATMAP_WEEKDAY_LABELS.map((label) => (
+          <span key={label}>{label}</span>
+        ))}
       </div>
       <div className="activity-weeks">
         {weeks.map((week, weekIndex) => (
@@ -326,32 +333,66 @@ function ActivityHeatmap({ history }: { history: InterviewHistoryItem[] }) {
 
 function LandingCards() {
   return (
-    <section className="info-grid">
-      <article className="flow-card feature-card">
-        <p className="section-eyebrow">1. Configure</p>
-        <h2>Bring your own context</h2>
-        <p className="mt-2">
-          Paste your CV and job description directly as text or upload them as pdf or docx files.
-        </p>
-      </article>
+    <section className="flow-card landing-simple-card">
+      <div className="landing-simple-grid">
+        <div className="landing-hero-column">
+          <div className="landing-simple-copy">
+            <p className="section-eyebrow">Interview Practice</p>
+            <h1>Practice the interview before it counts.</h1>
+            <p className="support-copy">
+              Build one preparation loop around your CV, the role you want, and the kind of interview
+              you actually expect to face.
+            </p>
+          </div>
 
-      <article className="flow-card feature-card">
-        <p className="section-eyebrow">2. Practice</p>
-        <h2>Simulate real interviews</h2>
-        <p className="mt-2">
-          Answer one question at a time in a guided, realistic flow. The AI adapts dynamically,
-          challenging you with behavioral and technical prompts, then stepping into a coding round.
-        </p>
-      </article>
+          <div className="landing-simple-highlights">
+            <div className="landing-simple-highlight">
+              <strong>Load real context</strong>
+              <span>Start with the actual role, not a generic prompt library.</span>
+            </div>
+            <div className="landing-simple-highlight">
+              <strong>Stay in one flow</strong>
+              <span>Move from interview setup to live practice and review without switching tools.</span>
+            </div>
+          </div>
+        </div>
 
-      <article className="flow-card feature-card">
-        <p className="section-eyebrow">3. Review</p>
-        <h2>Get actionable feedback</h2>
-        <p className="mt-2">
-          Review detailed scorecards, strengths, and improvement areas after each session. Revisit
-          past interviews to track progress and refine your answers over time.
-        </p>
-      </article>
+        <div className="landing-simple-side">
+          <article className="landing-showcase-panel landing-showcase-primary">
+            <p className="section-eyebrow">Session Surface</p>
+            <h2>A workspace built around one interview loop.</h2>
+            <div className="landing-surface-list">
+              <p>
+                <strong>Practice:</strong> behavioral prompts, technical discussion, and an integrated coding round.
+              </p>
+              <p>
+                <strong>Input:</strong> your CV, the target job description, and the company context you care about.
+              </p>
+              <p>
+                <strong>Output:</strong> structured feedback, saved history, and a clearer next step after every session.
+              </p>
+            </div>
+          </article>
+
+          <div className="landing-panel-grid">
+            <article className="landing-showcase-panel">
+              <p className="section-eyebrow">Interview Flow</p>
+              <h3>One session, multiple stages</h3>
+              <p className="support-copy">
+                Practice the full rhythm of an interview instead of isolated questions.
+              </p>
+            </article>
+
+            <article className="landing-showcase-panel">
+              <p className="section-eyebrow">Review Loop</p>
+              <h3>Feedback you can revisit</h3>
+              <p className="support-copy">
+                Keep completed sessions, compare outcomes, and sharpen the next attempt.
+              </p>
+            </article>
+          </div>
+        </div>
+      </div>
     </section>
   )
 }
@@ -442,41 +483,6 @@ export default function HomePage() {
 
   return (
     <section className="home-layout">
-      <article className={isAuthenticated ? 'hero-card dashboard-hero' : 'hero-card'}>
-        <p className="section-eyebrow">Interview Simulator</p>
-        <h1>
-          {isAuthenticated
-            ? 'Track your interview practice like a real training loop.'
-            : 'Run full mock interviews and get instant detailed feedback.'}
-        </h1>
-        <p className="support-copy">
-          {isAuthenticated
-            ? 'Your dashboard brings together recent scores, interview volume, and practice consistency so you can see whether your preparation is improving over time.'
-            : 'Upload or paste your CV and target job description, pick the interview length, answer one question at a time, move into a live coding round, and finish with a scored performance report.'}
-        </p>
-        <div className="hero-actions">
-          {isAuthenticated ? (
-            <>
-              <NavLink to="/interviews/new" className="primary-button">
-                Start New Interview
-              </NavLink>
-              <NavLink to="/interviews/history" className="secondary-button">
-                Open History
-              </NavLink>
-            </>
-          ) : (
-            <>
-              <NavLink to="/register" className="primary-button">
-                Create Account
-              </NavLink>
-              <NavLink to="/login" className="secondary-button">
-                Log In
-              </NavLink>
-            </>
-          )}
-        </div>
-      </article>
-
       {isAuthenticated ? (
         <>
           {isAuthLoading || isHistoryLoading ? (
@@ -531,28 +537,30 @@ export default function HomePage() {
                   <ScoreTrendChart sessions={completedSessions} />
                 </article>
 
-                <article className="flow-card dashboard-panel">
+                <article className="flow-card dashboard-panel activity-panel">
                   <div className="section-head">
                     <div>
                       <p className="section-eyebrow">Practice Rhythm</p>
                       <h2>Recent activity over the last 16 weeks</h2>
                     </div>
                   </div>
-                  <ActivityHeatmap history={history} />
-                  <div className="activity-legend">
-                    <span>Less</span>
-                    <div className="activity-legend-scale">
-                      <span className="activity-cell level-0" />
-                      <span className="activity-cell level-1" />
-                      <span className="activity-cell level-2" />
-                      <span className="activity-cell level-3" />
-                      <span className="activity-cell level-4" />
+                  <div className="activity-panel-body">
+                    <ActivityHeatmap history={history} />
+                    <div className="activity-legend">
+                      <span>Less</span>
+                      <div className="activity-legend-scale">
+                        <span className="activity-cell level-0" />
+                        <span className="activity-cell level-1" />
+                        <span className="activity-cell level-2" />
+                        <span className="activity-cell level-3" />
+                        <span className="activity-cell level-4" />
+                      </div>
+                      <span>More</span>
                     </div>
-                    <span>More</span>
                   </div>
                 </article>
 
-                <article className="flow-card dashboard-panel">
+                <article className="flow-card dashboard-panel mix-panel">
                   <p className="section-eyebrow">Interview Mix</p>
                   <h2>How you are distributing practice length</h2>
                   <div className="mix-chart">
@@ -593,16 +601,34 @@ export default function HomePage() {
                 <article className="flow-card dashboard-panel insight-panel">
                   <p className="section-eyebrow">Independence</p>
                   <h2>How often you rely on help during practice</h2>
-                  <div className="score-list">
-                    <p>Without help: {interviewsWithoutHelp}</p>
-                    <p>With help: {interviewsWithHelp}</p>
-                    <p>
-                      Independent answer rate:{' '}
-                      {averageIndependentAnswerRatio === null
-                        ? 'Unavailable'
-                        : formatPercent(averageIndependentAnswerRatio)}
-                    </p>
-                    <p>Focus loss time: {totalFocusLossMinutes} min</p>
+                  <div className="independence-grid">
+                    <article className="independence-card">
+                      <span className="independence-label">Without help</span>
+                      <strong className="independence-value">{interviewsWithoutHelp}</strong>
+                      <p className="independence-note">Sessions completed without using hints or model answers.</p>
+                    </article>
+
+                    <article className="independence-card">
+                      <span className="independence-label">With help</span>
+                      <strong className="independence-value">{interviewsWithHelp}</strong>
+                      <p className="independence-note">Sessions where you relied on built-in support during practice.</p>
+                    </article>
+
+                    <article className="independence-card">
+                      <span className="independence-label">Independent answer rate</span>
+                      <strong className="independence-value">
+                        {averageIndependentAnswerRatio === null
+                          ? 'Unavailable'
+                          : formatPercent(averageIndependentAnswerRatio)}
+                      </strong>
+                      <p className="independence-note">Average share of answered pre-coding prompts handled without help.</p>
+                    </article>
+
+                    <article className="independence-card">
+                      <span className="independence-label">Focus loss time</span>
+                      <strong className="independence-value">{totalFocusLossMinutes} min</strong>
+                      <p className="independence-note">Estimated time spent away from the interview tab across saved sessions.</p>
+                    </article>
                   </div>
                 </article>
 
