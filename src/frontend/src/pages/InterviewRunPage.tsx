@@ -864,10 +864,6 @@ export default function InterviewRunPage() {
   }
 
   const questionStageComplete = session.current_stage === 'coding' || session.current_stage === 'completed'
-  const lastHandoff =
-    session.handoff_history.length > 0
-      ? session.handoff_history[session.handoff_history.length - 1]
-      : null
   const currentQuestion =
     questionStageComplete
       ? null
@@ -900,13 +896,7 @@ export default function InterviewRunPage() {
         </div>
         <div className="progress-copy">
           <span>Stage: {session.current_stage}</span>
-          <span>Active agent: {session.active_agent ?? 'orchestrator'}</span>
         </div>
-        {lastHandoff && (
-          <p className="support-copy">
-            Routed from {lastHandoff.from_agent} to {lastHandoff.to_agent}: {lastHandoff.reason}
-          </p>
-        )}
         <div className="progress-track" aria-hidden="true">
           <div className="progress-fill" style={{ width: `${progressValue}%` }} />
         </div>

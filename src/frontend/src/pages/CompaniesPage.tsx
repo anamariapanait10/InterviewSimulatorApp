@@ -291,15 +291,6 @@ export default function CompaniesPage() {
 
   return (
     <section className="page-stack">
-      <article className="hero-card companies-hero">
-        <p className="section-eyebrow">Company Knowledge</p>
-        <h1>Build interview prep context around real companies.</h1>
-        <p className="support-copy">
-          Create company profiles, ingest official or manual knowledge, and test semantic retrieval
-          before using that context in interview generation.
-        </p>
-      </article>
-
       {error && (
         <p className="status-banner error" role="alert">
           {error}

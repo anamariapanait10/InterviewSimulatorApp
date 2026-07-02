@@ -71,14 +71,6 @@ export default function InterviewHistoryPage() {
 
   return (
     <section className="page-stack">
-      <article className="flow-card">
-        <p className="section-eyebrow">Interview History</p>
-        <h1>Review past sessions</h1>
-        <p className="support-copy">
-          Every interview is saved in the database and can be reopened for the full summary report.
-        </p>
-      </article>
-
       {history.length === 0 ? (
         <article className="flow-card">
           <h2>No interviews yet</h2>
