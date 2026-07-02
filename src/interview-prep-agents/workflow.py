@@ -76,6 +76,29 @@ class FinalEvaluationOutput(BaseModel):
     question_feedback: list[FinalQuestionFeedbackOutput]
 
 
+def _normalize_final_evaluation_scales(output: FinalEvaluationOutput) -> FinalEvaluationOutput:
+    hundred_scale_fields = {
+        "behavioral_score": output.behavioral_score,
+        "technical_score": output.technical_score,
+        "coding_score": output.coding_score,
+        "communication_score": output.communication_score,
+        "overall_score": output.overall_score,
+    }
+    if output.job_match_score is not None:
+        hundred_scale_fields["job_match_score"] = output.job_match_score
+
+    has_hundred_scale_value = any(value > 10 for value in hundred_scale_fields.values())
+    has_ten_scale_value = any(1 <= value <= 10 for value in hundred_scale_fields.values())
+    if not has_hundred_scale_value or not has_ten_scale_value:
+        return output
+
+    normalized = {
+        name: value * 10 if 1 <= value <= 10 else value
+        for name, value in hundred_scale_fields.items()
+    }
+    return output.model_copy(update=normalized)
+
+
 @dataclass
 class OrchestrationContext:
     action: str
@@ -367,6 +390,97 @@ def _coding_complexity_discussed(
             if str(event.get("transcript_excerpt") or "").strip()
         )
     return _coding_contains_complexity_language("\n".join(evidence_parts))
+
+
+def _coding_all_evidence_text(session: dict[str, Any]) -> str:
+    coding_round = session.get("coding_round") or {}
+    conversation = coding_round.get("conversation") or []
+    parts = [
+        str(coding_round.get("transcript") or ""),
+        str(coding_round.get("current_code") or ""),
+    ]
+    parts.extend(
+        str(turn.get("content") or "")
+        for turn in conversation
+        if str(turn.get("content") or "").strip()
+    )
+    return "\n".join(part for part in parts if part).strip()
+
+
+def _coding_contains_edge_case_language(text: str) -> bool:
+    lowered = _strip(text).lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "edge case",
+            "empty",
+            "null",
+            "none",
+            "zero",
+            "duplicate",
+            "single element",
+            "overflow",
+            "bounds",
+            "negative",
+            "corner case",
+        )
+    )
+
+
+def _coding_edge_case_handling_present(session: dict[str, Any]) -> bool:
+    evidence_text = _coding_all_evidence_text(session)
+    if _coding_contains_edge_case_language(evidence_text):
+        return True
+
+    code = str((session.get("coding_round") or {}).get("current_code") or "").lower()
+    return any(
+        snippet in code
+        for snippet in (
+            "if not ",
+            "== 0",
+            "<= 0",
+            ">= len",
+            " is none",
+            " is null",
+            "return []",
+            "return -1",
+            "return 0",
+            "len(",
+        )
+    )
+
+
+def _coding_contains_debugging_language(text: str) -> bool:
+    lowered = _strip(text).lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "debug",
+            "bug",
+            "fixed",
+            "fix",
+            "error",
+            "wrong",
+            "issue",
+            "test case",
+            "failing",
+            "failure",
+        )
+    )
+
+
+def _coding_debugging_signal_present(session: dict[str, Any]) -> bool:
+    coding_round = session.get("coding_round") or {}
+    evidence_text = _coding_all_evidence_text(session)
+    if _coding_contains_debugging_language(evidence_text):
+        return True
+
+    code_change_events = sum(
+        1
+        for event in (coding_round.get("event_log") or [])
+        if str(event.get("type") or "") == "code_changed"
+    )
+    return code_change_events >= 2
 
 
 def _coding_has_clarification_signal(context: OrchestrationContext) -> bool:
@@ -958,17 +1072,10 @@ Rules:
 - Use the resume as baseline evidence for prior fit, then adjust confidence up or down based on how well the candidate supported that fit in their answers.
 - Return matched_requirements and missing_requirements as short concrete bullets phrased as plain strings.
 - Provide question_feedback for every recorded pre-coding question using the exact question_id values above.
-- Score each section fairly and pragmatically.
-- Use this calibration:
-  - 90-100 exceptional
-  - 80-89 strong
-  - 70-79 solid
-  - 60-69 mixed / borderline
-  - 40-59 weak
-  - below 40 clearly poor
-- If the candidate leaves the starter code essentially unchanged, does not show a concrete implementation, or gives only a weak explanation, coding_score must stay low.
-- If the coding round shows no real implementation progress, coding_score should usually be 35 or below.
-- Do not inflate coding_score just because the candidate described a vague idea.
+- Score each section fairly and pragmatically from the actual evidence in the transcript and code. Do not mechanically normalize scores toward the middle.
+- The following fields must be integers on a 1-100 scale: behavioral_score, technical_score, coding_score, communication_score, overall_score, and job_match_score.
+- The following coding dimension fields must be integers on a 1-10 scale: coding_communication_score, coding_problem_solving_score, coding_implementation_score, coding_complexity_score, coding_debugging_score, and coding_edge_cases_score.
+- Do not mix the 1-100 overall fields with the 1-10 coding dimension fields.
 - Return explicit coding dimension scores from 1 to 10 for:
   - coding_communication_score
   - coding_problem_solving_score
@@ -976,10 +1083,31 @@ Rules:
   - coding_complexity_score
   - coding_debugging_score
   - coding_edge_cases_score
-- If the candidate wrote solid code but gave little or no spoken explanation, coding_communication_score must be low even if coding_score is decent.
-- If the candidate gave concrete runtime or memory trade-off reasoning, allow a solid coding_complexity_score even if they did not state formal Big-O notation perfectly.
-- If edge cases were handled in the implementation, constraints discussion, or examples, allow a solid coding_edge_cases_score even if the candidate did not enumerate them as a separate list.
-- Do not penalize coding_debugging_score just because no debugging was needed. Lower it only when the candidate missed obvious bugs, failed to investigate incorrect behavior, or could not reason about failure modes when debugging was relevant.
+- Score each coding dimension independently. Do not flatten all coding dimensions to the same score unless the evidence genuinely supports that.
+- Use this coding rubric:
+  - `9-10`: exceptional, clearly above normal interview expectations
+  - `8`: strong, clearly good performance with only minor gaps
+  - `7`: solid, correct or mostly correct with some meaningful room to improve
+  - `6`: acceptable but uneven
+  - `4-5`: weak
+  - `1-3`: clearly poor
+- Communication should reflect how clearly the candidate explained the plan, implementation, trade-offs, and decisions while solving.
+- Problem solving should reflect decomposition, approach quality, algorithm choice, and adaptability.
+- Implementation should reflect code correctness, completeness, quality, and alignment with the intended solution.
+- Complexity should reflect the quality of time/space reasoning. Give credit for clear trade-off reasoning even without perfect formal Big-O phrasing.
+- Edge cases should reflect whether the candidate identified, covered, or handled important corner cases in discussion or in code.
+- Debugging should reflect debugging skill only when debugging or failure analysis was actually relevant. If no debugging was needed because the solution was correct and stable, do not lower the score just for lack of debugging activity.
+- If the candidate produced a correct, well-explained solution, it is normal for several coding sub-scores to be 8 or higher.
+- Reserve 9/10 and 10/10 for unusually strong performance, not just correct completion.
+- Set coding_score from 1 to 100 based primarily on the coding sub-scores and the overall quality of the round. It should usually be close to the sub-score profile rather than contradicting it sharply.
+- Use this overall coding calibration:
+  - `90-100`: exceptional
+  - `80-89`: strong
+  - `70-79`: solid
+  - `60-69`: mixed / borderline
+  - `40-59`: weak
+  - `below 40`: clearly poor
+- If there was no real implementation progress or the starter code stayed essentially unchanged, score the coding round low. Otherwise, do not artificially hold scores down.
 - Keep job_match_score and overall_score separate when needed. A candidate may have a decent background fit but perform weakly in the interview, or the reverse.
 - For question_feedback scores, use a 1-10 scale and give one short, concrete sentence per question.
 - Return one coherent final recommendation.
@@ -1250,91 +1378,41 @@ async def _bootstrap_session(session_id: str) -> dict[str, Any]:
 
 
 def _build_evaluation_and_report(output: FinalEvaluationOutput, session: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    coding_evidence = _coding_evidence_summary(session)
-    guarded_output = output
-    if coding_evidence["weak_coding_round"]:
-        guarded_output = output.model_copy(
-            update={
-                "coding_score": min(output.coding_score, 35),
-                "overall_score": min(output.overall_score, 55),
-                "coding_communication_score": min(output.coding_communication_score, 2),
-                "coding_problem_solving_score": min(output.coding_problem_solving_score, 4),
-                "coding_implementation_score": min(output.coding_implementation_score, 4),
-                "coding_complexity_score": min(output.coding_complexity_score, 3),
-                "coding_debugging_score": min(output.coding_debugging_score, 3),
-                "coding_edge_cases_score": min(output.coding_edge_cases_score, 3),
-                "hire_recommendation": (
-                    output.hire_recommendation
-                    if str(output.hire_recommendation or "").strip().lower() in {"no hire", "leaning no hire"}
-                    else "No Hire"
-                ),
-            }
-        )
-    elif coding_evidence["starter_code_unchanged"]:
-        guarded_output = output.model_copy(
-            update={
-                "coding_score": min(output.coding_score, 45),
-                "overall_score": min(output.overall_score, 65),
-                "coding_implementation_score": min(output.coding_implementation_score, 5),
-            }
-        )
-
-    low_explanation = coding_evidence["candidate_message_chars"] < 100 and coding_evidence["transcript_chars"] < 100
-    no_code_change = not coding_evidence["code_changed"]
-    if low_explanation:
-        guarded_output = guarded_output.model_copy(
-            update={
-                "coding_communication_score": min(
-                    guarded_output.coding_communication_score,
-                    4,
-                ),
-                "coding_complexity_score": min(guarded_output.coding_complexity_score, 6),
-                "coding_edge_cases_score": min(guarded_output.coding_edge_cases_score, 6),
-            }
-        )
-    elif no_code_change:
-        guarded_output = guarded_output.model_copy(
-            update={
-                "coding_communication_score": min(guarded_output.coding_communication_score, 5),
-                "coding_complexity_score": min(guarded_output.coding_complexity_score, 6),
-                "coding_edge_cases_score": min(guarded_output.coding_edge_cases_score, 6),
-            }
-        )
-
-    coding_evaluation = None
+    output = _normalize_final_evaluation_scales(output)
     coding_round = session.get("coding_round") or {}
+    coding_evaluation = None
     if coding_round.get("problem"):
         coding_evaluation = {
-            "communication": guarded_output.coding_communication_score,
-            "problem_solving": guarded_output.coding_problem_solving_score,
-            "coding": guarded_output.coding_implementation_score,
-            "complexity_analysis": guarded_output.coding_complexity_score,
-            "debugging": guarded_output.coding_debugging_score,
-            "edge_cases": guarded_output.coding_edge_cases_score,
-            "overall_score": guarded_output.coding_score,
-            "hire_recommendation": guarded_output.hire_recommendation,
-            "summary": guarded_output.coding_feedback,
-            "strengths": guarded_output.strengths[:3],
-            "concerns": guarded_output.improvements[:3],
+            "communication": output.coding_communication_score,
+            "problem_solving": output.coding_problem_solving_score,
+            "coding": output.coding_implementation_score,
+            "complexity_analysis": output.coding_complexity_score,
+            "debugging": output.coding_debugging_score,
+            "edge_cases": output.coding_edge_cases_score,
+            "overall_score": output.coding_score,
+            "hire_recommendation": output.hire_recommendation,
+            "summary": output.coding_feedback,
+            "strengths": output.strengths[:3],
+            "concerns": output.improvements[:3],
         }
 
-    evaluation = guarded_output.model_dump(mode="json")
+    evaluation = output.model_dump(mode="json")
     report = {
-        "summary": guarded_output.summary,
-        "strengths": guarded_output.strengths,
-        "improvements": guarded_output.improvements,
-        "behavioral_feedback": guarded_output.behavioral_feedback,
-        "technical_feedback": guarded_output.technical_feedback,
-        "communication_feedback": guarded_output.communication_feedback,
-        "job_match_score": guarded_output.job_match_score,
-        "job_match_feedback": guarded_output.job_match_feedback,
-        "matched_requirements": guarded_output.matched_requirements,
-        "missing_requirements": guarded_output.missing_requirements,
-        "recommendation": guarded_output.recommendation,
-        "question_feedback": [item.model_dump(mode="json") for item in guarded_output.question_feedback],
-        "coding_feedback": guarded_output.coding_feedback,
+        "summary": output.summary,
+        "strengths": output.strengths,
+        "improvements": output.improvements,
+        "behavioral_feedback": output.behavioral_feedback,
+        "technical_feedback": output.technical_feedback,
+        "communication_feedback": output.communication_feedback,
+        "job_match_score": output.job_match_score,
+        "job_match_feedback": output.job_match_feedback,
+        "matched_requirements": output.matched_requirements,
+        "missing_requirements": output.missing_requirements,
+        "recommendation": output.recommendation,
+        "question_feedback": [item.model_dump(mode="json") for item in output.question_feedback],
+        "coding_feedback": output.coding_feedback,
         "coding_evaluation": coding_evaluation,
-        "hire_recommendation": guarded_output.hire_recommendation,
+        "hire_recommendation": output.hire_recommendation,
     }
     return evaluation, report
 
