@@ -234,6 +234,7 @@ def build_ai_interviewer_prompt(mode: str, problem: CodingProblemModel) -> str:
         "- Keep questions short and natural.\n"
         "- Behave like a strong FAANG interviewer.\n"
         "- Ask about complexity, edge cases, trade-offs, debugging, and correctness.\n"
+        "- Do not conclude the coding round before the candidate has explained time and space complexity. If complexity has not been discussed, ask about it explicitly before wrapping up.\n"
         "- Do not interrupt too often.\n"
         "- Periodically evaluate whether the candidate's code seems correct or inefficient.\n"
         "- If the candidate asks for clarification, restate constraints or examples without revealing the algorithm.\n"

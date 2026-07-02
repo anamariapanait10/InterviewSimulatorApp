@@ -214,7 +214,7 @@ def _coding_evidence_summary(session: dict[str, Any]) -> dict[str, Any]:
         and str(event.get("code_excerpt") or "").strip()
     )
 
-    low_signal_explanation = candidate_chars < 140 and len(transcript) < 140
+    low_signal_explanation = candidate_chars < 100 and len(transcript) < 100
     no_real_progress = not code_changed and code_change_events == 0
     weak_coding_round = no_real_progress and low_signal_explanation
 
@@ -330,6 +330,45 @@ def _coding_transcript_text(context: OrchestrationContext) -> str:
     return _strip(context.user_input or str(context.coding_payload.get("transcript_recent") or ""))
 
 
+def _coding_contains_complexity_language(text: str) -> bool:
+    lowered = _strip(text).lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "time complexity",
+            "space complexity",
+            "big o",
+            "o(",
+            "linear time",
+            "constant space",
+            "quadratic",
+            "log n",
+        )
+    )
+
+
+def _coding_complexity_discussed(
+    session: dict[str, Any],
+    context: OrchestrationContext | None = None,
+) -> bool:
+    coding_round = session.get("coding_round") or {}
+    conversation = coding_round.get("conversation") or []
+    evidence_parts = [str(coding_round.get("transcript") or "")]
+    evidence_parts.extend(
+        str(turn.get("content") or "")
+        for turn in conversation
+        if str(turn.get("content") or "").strip()
+    )
+    if context is not None:
+        evidence_parts.append(_coding_transcript_text(context))
+        evidence_parts.extend(
+            str(event.get("transcript_excerpt") or "")
+            for event in (context.coding_payload.get("recent_client_events") or [])
+            if str(event.get("transcript_excerpt") or "").strip()
+        )
+    return _coding_contains_complexity_language("\n".join(evidence_parts))
+
+
 def _coding_has_clarification_signal(context: OrchestrationContext) -> bool:
     transcript = _coding_transcript_text(context).lower()
     event_types = _coding_recent_event_types(context)
@@ -431,6 +470,7 @@ def _coding_should_request_specialist(context: OrchestrationContext) -> bool:
     completion_signal = _coding_has_completion_signal(context)
     wrap_up_asked = _coding_round_flag(context.session, "wrap_up_question_asked")
     wrap_up_completed = _coding_round_flag(context.session, "wrap_up_completed")
+    complexity_discussed = _coding_complexity_discussed(context.session, context)
 
     if wrap_up_completed:
         return _coding_has_clarification_signal(context) or user_question
@@ -455,6 +495,18 @@ def _coding_should_request_specialist(context: OrchestrationContext) -> bool:
         return _coding_followup_count(context.session) < 2
 
     if mode == "implementation":
+        if (
+            not complexity_discussed
+            and (
+                completion_signal
+                or (wrap_up_asked and bool(transcript))
+                or (
+                    _coding_has_substantive_answer(context)
+                    and _coding_last_interviewer_source_event_type(context.session) in {"followup", "intervene"}
+                )
+            )
+        ):
+            return True
         if not transcript or "code_changed" in event_types:
             return False
         if completion_signal and not wrap_up_asked:
@@ -853,6 +905,8 @@ Rules:
 - Treat the current code excerpt as the source of truth for the implementation. If it is already present, do not ask the candidate to paste or share the code again.
 - If the candidate says the implementation is ready or asks you to verify it, inspect the current code directly and respond with a concrete code review observation or a brief confirmation.
 - If the candidate says they fixed or updated something after your code review question, re-check the current code before deciding to finish the coding round.
+- Before you end the coding round or tell the candidate they can finish the interview, make sure time and space complexity were discussed explicitly.
+- If the implementation looks done but complexity has not been discussed yet, ask one short complexity question instead of wrapping up.
 - In intervene mode, ask a short pointed question about the candidate's current gap.
 - Never invent a new problem outside the catalog.
 """.strip()
@@ -923,9 +977,9 @@ Rules:
   - coding_debugging_score
   - coding_edge_cases_score
 - If the candidate wrote solid code but gave little or no spoken explanation, coding_communication_score must be low even if coding_score is decent.
-- If complexity was not discussed, coding_complexity_score must not be high.
-- If edge cases were not discussed, coding_edge_cases_score must not be high.
-- If no debugging happened, coding_debugging_score should stay modest unless the candidate proactively reasoned through failure modes.
+- If the candidate gave concrete runtime or memory trade-off reasoning, allow a solid coding_complexity_score even if they did not state formal Big-O notation perfectly.
+- If edge cases were handled in the implementation, constraints discussion, or examples, allow a solid coding_edge_cases_score even if the candidate did not enumerate them as a separate list.
+- Do not penalize coding_debugging_score just because no debugging was needed. Lower it only when the candidate missed obvious bugs, failed to investigate incorrect behavior, or could not reason about failure modes when debugging was relevant.
 - Keep job_match_score and overall_score separate when needed. A candidate may have a decent background fit but perform weakly in the interview, or the reverse.
 - For question_feedback scores, use a 1-10 scale and give one short, concrete sentence per question.
 - Return one coherent final recommendation.
@@ -1225,18 +1279,25 @@ def _build_evaluation_and_report(output: FinalEvaluationOutput, session: dict[st
             }
         )
 
-    low_explanation = coding_evidence["candidate_message_chars"] < 120 and coding_evidence["transcript_chars"] < 120
+    low_explanation = coding_evidence["candidate_message_chars"] < 100 and coding_evidence["transcript_chars"] < 100
     no_code_change = not coding_evidence["code_changed"]
-    if low_explanation or no_code_change:
+    if low_explanation:
         guarded_output = guarded_output.model_copy(
             update={
                 "coding_communication_score": min(
                     guarded_output.coding_communication_score,
-                    3 if low_explanation else 5,
+                    4,
                 ),
-                "coding_complexity_score": min(guarded_output.coding_complexity_score, 4),
-                "coding_edge_cases_score": min(guarded_output.coding_edge_cases_score, 4),
-                "coding_debugging_score": min(guarded_output.coding_debugging_score, 4),
+                "coding_complexity_score": min(guarded_output.coding_complexity_score, 6),
+                "coding_edge_cases_score": min(guarded_output.coding_edge_cases_score, 6),
+            }
+        )
+    elif no_code_change:
+        guarded_output = guarded_output.model_copy(
+            update={
+                "coding_communication_score": min(guarded_output.coding_communication_score, 5),
+                "coding_complexity_score": min(guarded_output.coding_complexity_score, 6),
+                "coding_edge_cases_score": min(guarded_output.coding_edge_cases_score, 6),
             }
         )
 
@@ -1684,10 +1745,12 @@ async def handle_orchestrator_action(
                 coding_payload=coding_payload,
                 ui_context=ui_context or {},
             )
+            complexity_discussed = _coding_complexity_discussed(session, context_for_completion)
             if (
                 _coding_stage_mode(session) == "implementation"
                 and not _coding_round_flag(session, "wrap_up_question_asked")
                 and not _coding_round_flag(session, "wrap_up_completed")
+                and complexity_discussed
                 and not _coding_has_user_question_signal(context_for_completion)
                 and not _coding_has_clarification_signal(context_for_completion)
                 and not _coding_has_intervention_signal(context_for_completion)
@@ -1701,6 +1764,7 @@ async def handle_orchestrator_action(
                 _coding_stage_mode(session) == "implementation"
                 and _coding_round_flag(session, "wrap_up_question_asked")
                 and not _coding_round_flag(session, "wrap_up_completed")
+                and complexity_discussed
                 and not _coding_has_user_question_signal(context_for_completion)
                 and _coding_last_interviewer_source_event_type(session) == "followup"
                 and _coding_transcript_text(context_for_completion)
